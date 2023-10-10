@@ -1,4 +1,4 @@
-# libostree
+# libostree 
 
 This project is now known as "libostree", though it is still appropriate to use
 the previous name: "OSTree" (or "ostree"). The focus is on projects which use
