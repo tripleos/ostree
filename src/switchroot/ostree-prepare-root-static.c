@@ -132,7 +132,8 @@ resolve_deploy_path (const char *root_mountpoint)
     err (EXIT_FAILURE, "realpath(%s) failed", destpath);
   if (stat (deploy_path, &stbuf) < 0)
     err (EXIT_FAILURE, "stat(%s) failed", deploy_path);
-    /* Quiet logs if there's no journal */
+
+/* Quiet logs if there's no journal */
 #ifdef USE_LIBSYSTEMD
   const char *resolved_path = deploy_path + strlen (root_mountpoint);
   sd_journal_send ("MESSAGE=Resolved OSTree target to: %s", deploy_path,
@@ -204,12 +205,11 @@ main (int argc, char *argv[])
   const bool sysroot_readonly = sysroot_is_configured_ro (root_arg);
   const bool sysroot_currently_writable = !path_is_on_readonly_fs (root_arg);
 
-  /* Work-around for a kernel bug: for some reason the kernel
-   * refuses switching root if any file systems are mounted
-   * MS_SHARED. Hence remount them MS_PRIVATE here as a
-   * work-around.
+  /* Remount root MS_PRIVATE here to avoid errors due to the kernel-enforced
+   * constraint that disallows MS_SHARED mounts to be moved.
    *
-   * https://bugzilla.redhat.com/show_bug.cgi?id=847418 */
+   * Kernel docs: Documentation/filesystems/sharedsubtree.txt
+   */
   if (mount (NULL, "/", NULL, MS_REC | MS_PRIVATE | MS_SILENT, NULL) < 0)
     err (EXIT_FAILURE, "failed to make \"/\" private mount");
 
@@ -228,9 +228,6 @@ main (int argc, char *argv[])
    * writable bind-mounts (for /etc and /var) are required later on. */
   if (sysroot_readonly)
     {
-      if (!sysroot_currently_writable)
-        errx (EXIT_FAILURE, "sysroot.readonly=true requires %s to be writable at this point",
-              root_arg);
       /* Pass on the fact that we discovered a readonly sysroot to ostree-remount.service */
       int fd = open (_OSTREE_SYSROOT_READONLY_STAMP, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
       if (fd < 0)

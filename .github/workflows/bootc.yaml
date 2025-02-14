@@ -1,0 +1,32 @@
+name: ci-bootc
+
+permissions:
+  actions: read
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  c9s-bootc-e2e:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v3
+      - name: build
+        run: sudo podman build -t localhost/test:latest -f ci/Containerfile.c9s .
+      - name: bootc install
+        run: |
+          set -xeuo pipefail
+          sudo podman run --env BOOTC_SKIP_SELINUX_HOST_CHECK=1 --rm -ti --privileged -v /:/target --pid=host --security-opt label=disable \
+            -v /dev:/dev -v /var/lib/containers:/var/lib/containers \
+            localhost/test:latest bootc install to-filesystem --skip-fetch-check \
+             --replace=alongside /target
+          # Verify labeling for /etc
+          sudo ls -dZ /ostree/deploy/default/deploy/*.0/etc |grep :etc_t:

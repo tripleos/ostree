@@ -29,8 +29,10 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/capability.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -100,5 +102,19 @@ ot_util_path_split_validate (const char *path, GPtrArray **out_components, GErro
     }
 
   ot_transfer_out_value (out_components, &ret_components);
+  return TRUE;
+}
+
+/* Check if current process is privileged */
+gboolean
+ot_util_process_privileged (void)
+{
+  if (geteuid () != 0)
+    return FALSE;
+
+  // https://github.com/containers/bootc/blob/c88fcfd6e145863408bde7d4706937dd323f64e2/lib/src/cli.rs#L621
+  if (prctl (PR_CAPBSET_READ, CAP_SYS_ADMIN) != 1)
+    return FALSE;
+
   return TRUE;
 }

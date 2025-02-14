@@ -1,6 +1,6 @@
 //! # Rust bindings for **libostree**
 //!
-//! [libostree](https://ostree.readthedocs.io) is both a shared library and suite of command line
+//! [libostree](https://ostreedev.github.io/ostree/) is both a shared library and suite of command line
 //! tools that combines a "git-like" model for committing and downloading bootable filesystem trees,
 //! along with a layer for deploying them and managing the bootloader configuration.
 
@@ -56,6 +56,7 @@ mod object_name;
 pub use crate::object_name::*;
 mod object_details;
 pub use crate::object_details::*;
+mod deployment;
 mod repo;
 pub use crate::repo::*;
 #[cfg(any(feature = "v2016_8", feature = "dox"))]

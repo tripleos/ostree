@@ -1,5 +1,5 @@
 ---
-nav_order: 9
+nav_order: 100
 ---
 
 # Managing content in OSTree repositories
@@ -7,6 +7,8 @@ nav_order: 9
 
 1. TOC
 {:toc}
+
+<!-- SPDX-License-Identifier: (CC-BY-SA-3.0 OR GFDL-1.3-or-later) -->
 
 Once you have a build system going, if you actually want client
 systems to retrieve the content, you will quickly feel a need for
@@ -268,6 +270,3 @@ $ ostree --repo=/path/to/repo summary -u
 ```
 
 After that, clients fetching that commit will prefer fetching the "scratch" delta if they don't have the original ref.
-
-###### Licensing for this document:
-`SPDX-License-Identifier: (CC-BY-SA-3.0 OR GFDL-1.3-or-later)`

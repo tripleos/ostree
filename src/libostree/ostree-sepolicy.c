@@ -254,6 +254,27 @@ get_policy_checksum (char **out_csum, GCancellable *cancellable, GError **error)
 
 #endif
 
+__attribute__ ((format (printf, 2, 3))) static int
+_ostree_sepolicy_null_log (int type, const char *fmt, ...)
+{
+  return 0;
+}
+
+/**
+ * ostree_sepolicy_set_null_log:
+ * Disable SELinux's builtin logging; one rarely wants this enabled.
+ *
+ * Since: 2025.2
+ */
+void
+ostree_sepolicy_set_null_log (void)
+{
+#ifdef HAVE_SELINUX
+  selinux_set_callback (SELINUX_CB_LOG,
+                        (const union selinux_callback){ .func_log = _ostree_sepolicy_null_log });
+#endif
+}
+
 /**
  * ostree_sepolicy_new_from_commit:
  * @repo: The repo
@@ -497,7 +518,7 @@ ostree_sepolicy_get_path (OstreeSePolicy *self)
  * ostree_sepolicy_get_name:
  * @self:
  *
- * Returns: (transfer none): Type of current policy
+ * Returns: (transfer none) (nullable): Type of current policy
  */
 const char *
 ostree_sepolicy_get_name (OstreeSePolicy *self)
@@ -752,4 +773,20 @@ _ostree_filter_selinux_xattr (GVariant *xattrs)
   if (!have_xattrs)
     return NULL;
   return g_variant_ref_sink (g_variant_builder_end (&builder));
+}
+
+/**
+ * _ostree_sepolicy_host_enabled:
+ * @self: Policy
+ *
+ * Return if the host has selinux enabled
+ */
+gboolean
+_ostree_sepolicy_host_enabled (OstreeSePolicy *self)
+{
+#ifdef HAVE_SELINUX
+  return cached_is_selinux_enabled ();
+#else
+  return FALSE;
+#endif
 }

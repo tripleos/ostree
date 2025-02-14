@@ -78,7 +78,12 @@ struct OstreeFetcher
   struct curl_slist *extra_headers;
   int tmpdir_dfd;
   bool force_anonymous;
+  bool finalizing; // Set if we're in the process of teardown
   char *custom_user_agent;
+  guint32 opt_low_speed_limit;
+  guint32 opt_low_speed_time;
+  gboolean opt_retry_all;
+  guint32 opt_max_outstanding_fetcher_requests;
 
   GMainContext *mainctx;
   CURLM *multi;
@@ -176,6 +181,15 @@ _ostree_fetcher_finalize (GObject *object)
 {
   OstreeFetcher *self = OSTREE_FETCHER (object);
 
+  // Because curl_multi_cleanup may invoke callbacks, we effectively have
+  // some circular references going on here. See discussion in
+  // https://github.com/curl/curl/issues/14860
+  // Basically what we do is make most callbacks libcurl may invoke into no-ops when
+  // we detect we're finalizing. The data structures are owned by this object and
+  // not by the callbacks, and will be destroyed below. Note that
+  // e.g. g_hash_table_unref() may itself invoke callbacks, which is where
+  // some data is cleaned up.
+  self->finalizing = true;
   curl_multi_cleanup (self->multi);
   g_free (self->remote_name);
   g_free (self->tls_ca_db_path);
@@ -223,23 +237,30 @@ _ostree_fetcher_class_init (OstreeFetcherClass *klass)
 static void
 _ostree_fetcher_init (OstreeFetcher *self)
 {
+  CURLMcode rc;
   self->multi = curl_multi_init ();
   self->outstanding_requests
       = g_hash_table_new_full (NULL, NULL, (GDestroyNotify)g_object_unref, NULL);
   self->sockets = g_hash_table_new_full (NULL, NULL, (GDestroyNotify)sock_unref, NULL);
-  curl_multi_setopt (self->multi, CURLMOPT_SOCKETFUNCTION, sock_cb);
-  curl_multi_setopt (self->multi, CURLMOPT_SOCKETDATA, self);
-  curl_multi_setopt (self->multi, CURLMOPT_TIMERFUNCTION, update_timeout_cb);
-  curl_multi_setopt (self->multi, CURLMOPT_TIMERDATA, self);
+  rc = curl_multi_setopt (self->multi, CURLMOPT_SOCKETFUNCTION, sock_cb);
+  g_assert_cmpint (rc, ==, CURLM_OK);
+  rc = curl_multi_setopt (self->multi, CURLMOPT_SOCKETDATA, self);
+  g_assert_cmpint (rc, ==, CURLM_OK);
+  rc = curl_multi_setopt (self->multi, CURLMOPT_TIMERFUNCTION, update_timeout_cb);
+  g_assert_cmpint (rc, ==, CURLM_OK);
+  rc = curl_multi_setopt (self->multi, CURLMOPT_TIMERDATA, self);
+  g_assert_cmpint (rc, ==, CURLM_OK);
 #if CURL_AT_LEAST_VERSION(7, 30, 0)
   /* Let's do something reasonable here. */
-  curl_multi_setopt (self->multi, CURLMOPT_MAX_TOTAL_CONNECTIONS, 8);
+  rc = curl_multi_setopt (self->multi, CURLMOPT_MAX_TOTAL_CONNECTIONS, 8);
+  g_assert_cmpint (rc, ==, CURLM_OK);
 #endif
   /* This version mirrors the version at which we're enabling HTTP2 support.
    * See also https://github.com/curl/curl/blob/curl-7_53_0/docs/examples/http2-download.c
    */
 #if CURL_AT_LEAST_VERSION(7, 51, 0)
-  curl_multi_setopt (self->multi, CURLMOPT_PIPELINING, CURLPIPE_MULTIPLEX);
+  rc = curl_multi_setopt (self->multi, CURLMOPT_PIPELINING, CURLPIPE_MULTIPLEX);
+  g_assert_cmpint (rc, ==, CURLM_OK);
 #endif
 }
 
@@ -291,6 +312,7 @@ ensure_tmpfile (FetcherRequest *req, GError **error)
 static void
 check_multi_info (OstreeFetcher *fetcher)
 {
+  CURLMcode rc;
   CURLMsg *msg;
   int msgs_left;
 
@@ -308,8 +330,10 @@ check_multi_info (OstreeFetcher *fetcher)
       if (msg->msg != CURLMSG_DONE)
         continue;
 
-      curl_easy_getinfo (easy, CURLINFO_PRIVATE, &task);
-      curl_easy_getinfo (easy, CURLINFO_EFFECTIVE_URL, &eff_url);
+      rc = curl_easy_getinfo (easy, CURLINFO_PRIVATE, &task);
+      g_assert_cmpint (rc, ==, CURLM_OK);
+      rc = curl_easy_getinfo (easy, CURLINFO_EFFECTIVE_URL, &eff_url);
+      g_assert_cmpint (rc, ==, CURLM_OK);
       /* We should have limited the protocols; this is what
        * curl's tool_operate.c does.
        */
@@ -317,6 +341,8 @@ check_multi_info (OstreeFetcher *fetcher)
       g_assert (is_file || g_str_has_prefix (eff_url, "http"));
 
       req = g_task_get_task_data (task);
+
+      gboolean retry_all = (!is_file && req->fetcher->opt_retry_all);
 
       if (req->caught_write_error)
         g_task_return_error (task, g_steal_pointer (&req->caught_write_error));
@@ -330,16 +356,20 @@ check_multi_info (OstreeFetcher *fetcher)
             }
           else
             {
-              g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
-                                       "While fetching %s: [%u] %s", eff_url, curlres,
-                                       curl_easy_strerror (curlres));
+              /* When it is not a file, we want to retry the request.
+               * We accomplish that by using G_IO_ERROR_TIMED_OUT.
+               */
+              g_task_return_new_error (
+                  task, G_IO_ERROR, retry_all ? G_IO_ERROR_TIMED_OUT : G_IO_ERROR,
+                  "While fetching %s: [%u] %s", eff_url, curlres, curl_easy_strerror (curlres));
               _ostree_fetcher_journal_failure (req->fetcher->remote_name, eff_url,
                                                curl_easy_strerror (curlres));
             }
         }
       else
         {
-          curl_easy_getinfo (easy, CURLINFO_RESPONSE_CODE, &response);
+          rc = curl_easy_getinfo (easy, CURLINFO_RESPONSE_CODE, &response);
+          g_assert_cmpint (rc, ==, CURLM_OK);
 
           if (!is_file && response == 304
               && (req->if_none_match != NULL || req->if_modified_since > 0))
@@ -352,12 +382,13 @@ check_multi_info (OstreeFetcher *fetcher)
 
           if (!is_file && !(response >= 200 && response < 300) && response != 304)
             {
-              GIOErrorEnum giocode = _ostree_fetcher_http_status_code_to_io_error (response);
+              GIOErrorEnum giocode
+                  = _ostree_fetcher_http_status_code_to_io_error (response, retry_all);
 
               if (req->idx + 1 == req->mirrorlist->len)
                 {
-                  g_autofree char *response_msg
-                      = g_strdup_printf ("Server returned HTTP %lu", response);
+                  g_autofree char *response_msg = g_strdup_printf (
+                      "While fetching %s: Server returned HTTP %lu", eff_url, response);
                   g_task_return_new_error (task, G_IO_ERROR, giocode, "%s", response_msg);
                   if (req->fetcher->remote_name
                       && !((req->flags & OSTREE_FETCHER_REQUEST_OPTIONAL_CONTENT) > 0
@@ -401,7 +432,8 @@ check_multi_info (OstreeFetcher *fetcher)
             }
         }
 
-      curl_multi_remove_handle (fetcher->multi, easy);
+      rc = curl_multi_remove_handle (fetcher->multi, easy);
+      g_assert_cmpint (rc, ==, CURLM_OK);
       if (continued_request)
         {
           req->idx++;
@@ -422,9 +454,11 @@ check_multi_info (OstreeFetcher *fetcher)
 static gboolean
 timer_cb (gpointer data)
 {
+  CURLMcode rc;
   OstreeFetcher *fetcher = data;
   g_clear_pointer (&fetcher->timer_event, destroy_and_unref_source);
-  (void)curl_multi_socket_action (fetcher->multi, CURL_SOCKET_TIMEOUT, 0, &fetcher->curl_running);
+  rc = curl_multi_socket_action (fetcher->multi, CURL_SOCKET_TIMEOUT, 0, &fetcher->curl_running);
+  g_assert_cmpint (rc, ==, CURLM_OK);
   check_multi_info (fetcher);
 
   return G_SOURCE_REMOVE;
@@ -453,11 +487,13 @@ static gboolean
 event_cb (int fd, GIOCondition condition, gpointer data)
 {
   OstreeFetcher *fetcher = data;
+  CURLMcode rc;
 
   int action
       = (condition & G_IO_IN ? CURL_CSELECT_IN : 0) | (condition & G_IO_OUT ? CURL_CSELECT_OUT : 0);
 
-  (void)curl_multi_socket_action (fetcher->multi, fd, action, &fetcher->curl_running);
+  rc = curl_multi_socket_action (fetcher->multi, fd, action, &fetcher->curl_running);
+  g_assert_cmpint (rc, ==, CURLM_OK);
   check_multi_info (fetcher);
   if (fetcher->curl_running > 0)
     {
@@ -507,7 +543,8 @@ addsock (curl_socket_t s, CURL *easy, int action, OstreeFetcher *fetcher)
   fdp->refcount = 1;
   fdp->fetcher = fetcher;
   setsock (fdp, s, action, fetcher);
-  curl_multi_assign (fetcher->multi, s, fdp);
+  CURLMcode rc = curl_multi_assign (fetcher->multi, s, fdp);
+  g_assert_cmpint (rc, ==, CURLM_OK);
   g_hash_table_add (fetcher->sockets, fdp);
 }
 
@@ -517,6 +554,10 @@ sock_cb (CURL *easy, curl_socket_t s, int what, void *cbp, void *sockp)
 {
   OstreeFetcher *fetcher = cbp;
   SockInfo *fdp = (SockInfo *)sockp;
+
+  // We do nothing if we're in the process of teardown; see below.
+  if (fetcher->finalizing)
+    return 0;
 
   if (what == CURL_POLL_REMOVE)
     {
@@ -541,6 +582,7 @@ sock_cb (CURL *easy, curl_socket_t s, int what, void *cbp, void *sockp)
 static size_t
 write_cb (void *ptr, size_t size, size_t nmemb, void *data)
 {
+  CURLMcode rc;
   const size_t realsize = size * nmemb;
   GTask *task = data;
   FetcherRequest *req;
@@ -555,7 +597,8 @@ write_cb (void *ptr, size_t size, size_t nmemb, void *data)
       if (realsize > req->max_size || (realsize + req->current_size) > req->max_size)
         {
           const char *eff_url;
-          curl_easy_getinfo (req->easy, CURLINFO_EFFECTIVE_URL, &eff_url);
+          rc = curl_easy_getinfo (req->easy, CURLINFO_EFFECTIVE_URL, &eff_url);
+          g_assert_cmpint (rc, ==, CURLM_OK);
           req->caught_write_error
               = g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED,
                              "URI %s exceeded maximum size of %" G_GUINT64_FORMAT " bytes", eff_url,
@@ -622,11 +665,13 @@ response_header_cb (const char *buffer, size_t size, size_t n_items, void *user_
 static int
 prog_cb (void *p, double dltotal, double dlnow, double ult, double uln)
 {
+  CURLMcode rc;
   GTask *task = p;
   FetcherRequest *req;
   char *eff_url;
   req = g_task_get_task_data (task);
-  curl_easy_getinfo (req->easy, CURLINFO_EFFECTIVE_URL, &eff_url);
+  rc = curl_easy_getinfo (req->easy, CURLINFO_EFFECTIVE_URL, &eff_url);
+  g_assert_cmpint (rc, ==, CURLM_OK);
   g_printerr ("Progress: %s (%g/%g)\n", eff_url, dlnow, dltotal);
   return 0;
 }
@@ -662,6 +707,31 @@ _ostree_fetcher_set_proxy (OstreeFetcher *self, const char *http_proxy)
 {
   g_free (self->proxy);
   self->proxy = g_strdup (http_proxy);
+}
+
+void
+_ostree_fetcher_set_low_speed_time (OstreeFetcher *self, guint32 opt_low_speed_time)
+{
+  self->opt_low_speed_time = opt_low_speed_time;
+}
+
+void
+_ostree_fetcher_set_low_speed_limit (OstreeFetcher *self, guint32 opt_low_speed_limit)
+{
+  self->opt_low_speed_limit = opt_low_speed_limit;
+}
+
+void
+_ostree_fetcher_set_retry_all (OstreeFetcher *self, gboolean opt_retry_all)
+{
+  self->opt_retry_all = opt_retry_all;
+}
+
+void
+_ostree_fetcher_set_max_outstanding_fetcher_requests (OstreeFetcher *self,
+                                                      guint32 opt_max_outstanding_fetcher_requests)
+{
+  self->opt_max_outstanding_fetcher_requests = opt_max_outstanding_fetcher_requests;
 }
 
 void
@@ -912,14 +982,10 @@ initiate_next_curl_request (FetcherRequest *req, GTask *task)
   g_assert_cmpint (rc, ==, CURLM_OK);
   rc = curl_easy_setopt (req->easy, CURLOPT_CONNECTTIMEOUT, 30L);
   g_assert_cmpint (rc, ==, CURLM_OK);
-  /* We used to set CURLOPT_LOW_SPEED_LIMIT and CURLOPT_LOW_SPEED_TIME
-   * here, but see https://github.com/ostreedev/ostree/issues/878#issuecomment-347228854
-   * basically those options don't play well with HTTP2 at the moment
-   * where we can have lots of outstanding requests.  Further,
-   * we could implement that functionality at a higher level
-   * more consistently too.
-   */
-
+  rc = curl_easy_setopt (req->easy, CURLOPT_LOW_SPEED_LIMIT, req->fetcher->opt_low_speed_limit);
+  g_assert_cmpint (rc, ==, CURLM_OK);
+  rc = curl_easy_setopt (req->easy, CURLOPT_LOW_SPEED_TIME, req->fetcher->opt_low_speed_time);
+  g_assert_cmpint (rc, ==, CURLM_OK);
   /* closure bindings -> task */
   rc = curl_easy_setopt (req->easy, CURLOPT_PRIVATE, task);
   g_assert_cmpint (rc, ==, CURLM_OK);

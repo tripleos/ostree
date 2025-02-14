@@ -1,5 +1,5 @@
 ---
-nav_order: 10
+nav_order: 110
 ---
 
 # Related Projects
@@ -7,6 +7,8 @@ nav_order: 10
 
 1. TOC
 {:toc}
+
+<!-- SPDX-License-Identifier: (CC-BY-SA-3.0 OR GFDL-1.3-or-later) -->
 
 OSTree is in many ways very evolutionary.  It builds on concepts and
 ideas introduced from many different projects such as
@@ -370,24 +372,21 @@ Linux software. It is designed to be used out-of-the-box on devices requiring
 high reliability, allowing you to focus on your application and not on building
 and maintaining the operating system.
 
-### TorizonCore
+### Torizon OS
 
-The platform OS - [TorizonCore](https://developer.toradex.com/knowledge-base/torizoncore-overview) -
+The platform OS - [Torizon OS](https://www.toradex.com/operating-systems/torizon) -
 is a minimal OS with a Docker runtime and libostree + Aktualizr. The main goal
 of this system is to allow application developers to use containers, while the
-maintainers of TorizonCore focus on the base system updates.
+maintainers of Torizon OS focus on the base system updates.
 
 ### TorizonCore Builder
 
-Since the TorizonCore OS is meant as a binary distribution, OS customization is
-made easier with [TorizonCore Builder](https://developer.toradex.com/knowledge-base/torizoncore-builder-tool),
+Since the Torizon OS is meant as a binary distribution, OS customization is
+made easier with [TorizonCore Builder](https://developer.toradex.com/torizon/os-customization/torizoncore-builder-tool-customizing-torizoncore-images/),
 as the tool abstracts the handling of OSTree concepts from the final users.
 
-### Torizon OTA
+### Torizon Cloud
 
-[Torizon OTA](https://developer.toradex.com/knowledge-base/torizon-update-system)
-is a hosted OTA update system that provides OS updates to TorizonCore using
+[Torizon Cloud](https://developer.toradex.com/torizon/torizon-platform/torizon-platform-services-overview/)
+is a hosted OTA update system that provides OS updates to Torizon OS using
 OSTree and Aktualizr.
-
-###### Licensing for this document:
-`SPDX-License-Identifier: (CC-BY-SA-3.0 OR GFDL-1.3-or-later)`

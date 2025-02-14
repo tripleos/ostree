@@ -19,15 +19,21 @@
 
 set -euo pipefail
 
-echo "1..$((29 + ${extra_admin_tests:-0}))"
+echo "1..$((31 + ${extra_admin_tests:-0}))"
 
+for flag in --modern --epoch=1; do
+    mkdir sysrootmin
+    ${CMD_PREFIX} ostree admin init-fs --modern sysrootmin
+    assert_has_dir sysrootmin/boot
+    assert_has_dir sysrootmin/ostree/repo
+    assert_not_has_dir sysrootmin/home
+    rm sysrootmin -rf
+done
 mkdir sysrootmin
-${CMD_PREFIX} ostree admin init-fs --modern sysrootmin
-assert_has_dir sysrootmin/boot
-assert_has_dir sysrootmin/ostree/repo
+${CMD_PREFIX} ostree admin init-fs --epoch=2 sysrootmin
+assert_streq "$(stat -c '%f' sysrootmin/ostree)" 41c0
 assert_not_has_dir sysrootmin/home
-rm sysrootmin -rf
-echo "ok init-fs --modern"
+echo "ok init-fs"
 
 function validate_bootloader() {
     cd ${test_tmpdir};
@@ -54,7 +60,9 @@ orig_mtime=$(stat -c '%.Y' sysroot/ostree/deploy)
 ${CMD_PREFIX} ostree --repo=sysroot/ostree/repo pull-local --remote=testos testos-repo testos/buildmain/x86_64-runtime
 rev=$(${CMD_PREFIX} ostree --repo=sysroot/ostree/repo rev-parse testos/buildmain/x86_64-runtime)
 export rev
-# This initial deployment gets kicked off with some kernel arguments
+# This initial deployment gets kicked off with some kernel arguments.  We also set the initial
+# timestamp of the deploy directory to the epoch as a regression test.
+touch -d @0 sysroot/ostree/deploy
 ${CMD_PREFIX} ostree admin deploy --karg=root=LABEL=MOO --karg=quiet --os=testos testos:testos/buildmain/x86_64-runtime
 new_mtime=$(stat -c '%.Y' sysroot/ostree/deploy)
 assert_not_streq "${orig_mtime}" "${new_mtime}"
@@ -62,6 +70,12 @@ ${CMD_PREFIX} ostree admin status | tee status.txt
 assert_not_file_has_content status.txt "pending"
 assert_not_file_has_content status.txt "rollback"
 validate_bootloader
+
+if has_ostree_feature composefs; then
+    if ! test -f sysroot/ostree/deploy/testos/deploy/*.0/.ostree.cfs; then
+        fatal "missing composefs"
+    fi
+fi
 
 # Test the bootable and linux keys
 ${CMD_PREFIX} ostree --repo=sysroot/ostree/repo --print-metadata-key=ostree.linux show testos:testos/buildmain/x86_64-runtime >out.txt
@@ -76,13 +90,20 @@ assert_file_has_content curdir ^`pwd`/sysroot/ostree/deploy/testos/deploy/${rev}
 
 echo "ok --print-current-dir"
 
+if ${CMD_PREFIX} ostree admin deploy --stateroot=nosuchroot testos:testos/buildmain/x86_64-runtime 2>err.txt; then
+    fatal "deployed to nonexistent root"
+fi
+assert_file_has_content err.txt "error:.*No such stateroot: nosuchroot"
+
+echo "ok nice error for deploy with no stateroot"
+
 # Test layout of bootloader config and refs
 assert_not_has_dir sysroot/boot/loader.0
 assert_has_dir sysroot/boot/loader.1
 assert_has_dir sysroot/ostree/boot.1.1
-assert_has_file sysroot/boot/loader/entries/ostree-1-testos.conf
-assert_file_has_content sysroot/boot/loader/entries/ostree-1-testos.conf 'options.* root=LABEL=MOO'
-assert_file_has_content sysroot/boot/loader/entries/ostree-1-testos.conf 'options.* quiet'
+assert_has_file sysroot/boot/loader/entries/ostree-1.conf
+assert_file_has_content sysroot/boot/loader/entries/ostree-1.conf 'options.* root=LABEL=MOO'
+assert_file_has_content sysroot/boot/loader/entries/ostree-1.conf 'options.* quiet'
 assert_file_has_content sysroot/boot/ostree/testos-${bootcsum}/vmlinuz-3.6.0 'a kernel'
 assert_file_has_content sysroot/ostree/deploy/testos/deploy/${rev}.0/etc/os-release 'NAME=TestOS'
 assert_file_has_content sysroot/ostree/boot.1/testos/${bootcsum}/0/etc/os-release 'NAME=TestOS'
@@ -108,7 +129,7 @@ assert_not_has_dir sysroot/ostree/boot.0.0
 assert_not_has_dir sysroot/ostree/boot.1.0
 assert_not_has_dir sysroot/ostree/boot.1.1
 # Ensure we propagated kernel arguments from previous deployment
-assert_file_has_content sysroot/boot/loader/entries/ostree-2-testos.conf 'options.* root=LABEL=MOO'
+assert_file_has_content sysroot/boot/loader/entries/ostree-2.conf 'options.* root=LABEL=MOO'
 assert_file_has_content sysroot/ostree/deploy/testos/deploy/${rev}.1/etc/os-release 'NAME=TestOS'
 assert_file_has_content sysroot/ostree/boot.0/testos/${bootcsum}/0/etc/os-release 'NAME=TestOS'
 assert_ostree_deployment_refs 0/1/{0,1}
@@ -135,8 +156,8 @@ ${CMD_PREFIX} ostree admin os-init otheros
 ${CMD_PREFIX} ostree admin deploy --os=otheros testos/buildmain/x86_64-runtime
 assert_not_has_dir sysroot/boot/loader.0
 assert_has_dir sysroot/boot/loader.1
-assert_has_file sysroot/boot/loader/entries/ostree-2-testos.conf
-assert_has_file sysroot/boot/loader/entries/ostree-3-otheros.conf
+assert_has_file sysroot/boot/loader/entries/ostree-2.conf
+assert_has_file sysroot/boot/loader/entries/ostree-3.conf
 assert_file_has_content sysroot/ostree/deploy/testos/deploy/${rev}.1/etc/os-release 'NAME=TestOS'
 assert_file_has_content sysroot/ostree/deploy/otheros/deploy/${rev}.0/etc/os-release 'NAME=TestOS'
 assert_ostree_deployment_refs 1/1/{0,1,2}
@@ -148,9 +169,9 @@ echo "ok independent deploy"
 ${CMD_PREFIX} ostree admin deploy --retain --os=testos testos:testos/buildmain/x86_64-runtime
 assert_has_dir sysroot/boot/loader.0
 assert_not_has_dir sysroot/boot/loader.1
-assert_has_file sysroot/boot/loader/entries/ostree-4-testos.conf
+assert_has_file sysroot/boot/loader/entries/ostree-4.conf
 assert_file_has_content sysroot/ostree/deploy/testos/deploy/${rev}.2/etc/os-release 'NAME=TestOS'
-assert_has_file sysroot/boot/loader/entries/ostree-2-testos.conf
+assert_has_file sysroot/boot/loader/entries/ostree-2.conf
 assert_file_has_content sysroot/ostree/deploy/testos/deploy/${rev}.3/etc/os-release 'NAME=TestOS'
 ${CMD_PREFIX} ostree admin status
 assert_ostree_deployment_refs 0/1/{0,1,2,3}
@@ -180,18 +201,24 @@ ${CMD_PREFIX} ostree admin status
 validate_bootloader
 echo "ok deploy with modified /etc"
 
+if ${CMD_PREFIX} ostree admin undeploy blah 2>err.txt; then
+    fatal "undeploy parsed string"
+fi
+assert_file_has_content_literal err.txt 'error: Invalid index: blah'
+echo "ok undeploy error invalid int"
+
 # we now have 5 deployments, let's bring that back down to 1
 for i in $(seq 4); do
   ${CMD_PREFIX} ostree admin undeploy 0
 done
-assert_has_file sysroot/boot/loader/entries/ostree-1-testos.conf
-assert_not_has_file sysroot/boot/loader/entries/ostree-2-testos.conf
-assert_not_has_file sysroot/boot/loader/entries/ostree-3-otheros.conf
+assert_has_file sysroot/boot/loader/entries/ostree-1.conf
+assert_not_has_file sysroot/boot/loader/entries/ostree-2.conf
+assert_not_has_file sysroot/boot/loader/entries/ostree-3.conf
 ${CMD_PREFIX} ostree admin deploy --not-as-default --os=otheros testos:testos/buildmain/x86_64-runtime
 assert_has_dir sysroot/boot/loader.0
 assert_not_has_dir sysroot/boot/loader.1
-assert_has_file sysroot/boot/loader/entries/ostree-2-testos.conf
-assert_has_file sysroot/boot/loader/entries/ostree-1-otheros.conf
+assert_has_file sysroot/boot/loader/entries/ostree-2.conf
+assert_has_file sysroot/boot/loader/entries/ostree-1.conf
 ${CMD_PREFIX} ostree admin status
 validate_bootloader
 
@@ -200,9 +227,9 @@ echo "ok deploy --not-as-default"
 ${CMD_PREFIX} ostree admin deploy --retain-rollback --os=otheros testos:testos/buildmain/x86_64-runtime
 assert_not_has_dir sysroot/boot/loader.0
 assert_has_dir sysroot/boot/loader.1
-assert_has_file sysroot/boot/loader/entries/ostree-3-otheros.conf
-assert_has_file sysroot/boot/loader/entries/ostree-2-testos.conf
-assert_has_file sysroot/boot/loader/entries/ostree-1-otheros.conf
+assert_has_file sysroot/boot/loader/entries/ostree-3.conf
+assert_has_file sysroot/boot/loader/entries/ostree-2.conf
+assert_has_file sysroot/boot/loader/entries/ostree-1.conf
 ${CMD_PREFIX} ostree admin status
 validate_bootloader
 
@@ -210,11 +237,11 @@ echo "ok deploy --retain-rollback"
 
 
 ${CMD_PREFIX} ostree admin status
-assert_file_has_content sysroot/boot/loader/entries/ostree-3-otheros.conf "^title.*TestOS 42 1.0.10"
+assert_file_has_content sysroot/boot/loader/entries/ostree-3.conf "^title.*TestOS 42 1.0.10"
 ${CMD_PREFIX} ostree admin set-default 1
-assert_file_has_content sysroot/boot/loader/entries/ostree-3-testos.conf "^title.*TestOS 42 1.0.10"
+assert_file_has_content sysroot/boot/loader/entries/ostree-3.conf "^title.*TestOS 42 1.0.10"
 ${CMD_PREFIX} ostree admin set-default 1
-assert_file_has_content sysroot/boot/loader/entries/ostree-3-otheros.conf "^title.*TestOS 42 1.0.10"
+assert_file_has_content sysroot/boot/loader/entries/ostree-3.conf "^title.*TestOS 42 1.0.10"
 
 echo "ok set-default"
 
@@ -287,7 +314,7 @@ echo "ok deploy with unknown OS"
 
 ${CMD_PREFIX} ostree admin deploy --os=testos --karg-append=console=/dev/foo --karg-append=console=/dev/bar testos:testos/buildmain/x86_64-runtime
 ${CMD_PREFIX} ostree admin deploy --os=testos testos:testos/buildmain/x86_64-runtime
-assert_file_has_content sysroot/boot/loader/entries/ostree-4-testos.conf 'console=/dev/foo.*console=/dev/bar'
+assert_file_has_content sysroot/boot/loader/entries/ostree-4.conf 'console=/dev/foo.*console=/dev/bar'
 validate_bootloader
 
 echo "ok deploy with multiple kernel args"
@@ -297,17 +324,17 @@ os_repository_new_commit 0 "test upgrade multiple kernel args"
 ${CMD_PREFIX} ostree admin upgrade --os=testos
 newrev=$(${CMD_PREFIX} ostree --repo=sysroot/ostree/repo rev-parse testos/buildmain/x86_64-runtime)
 assert_not_streq ${origrev} ${newrev}
-assert_file_has_content sysroot/boot/loader/entries/ostree-4-testos.conf 'console=/dev/foo.*console=/dev/bar'
+assert_file_has_content sysroot/boot/loader/entries/ostree-4.conf 'console=/dev/foo.*console=/dev/bar'
 validate_bootloader
 
 echo "ok upgrade with multiple kernel args"
 
 os_repository_new_commit
 ${CMD_PREFIX} ostree admin upgrade --os=testos
-assert_file_has_content sysroot/boot/loader/entries/ostree-4-testos.conf "^title TestOS 42 ${version} (ostree:testos:0)$"
+assert_file_has_content sysroot/boot/loader/entries/ostree-4.conf "^title TestOS 42 ${version} (ostree:testos:0)$"
 os_repository_new_commit 0 0 testos/buildmain/x86_64-runtime 42
 ${CMD_PREFIX} ostree admin upgrade --os=testos
-assert_file_has_content sysroot/boot/loader/entries/ostree-4-testos.conf "^title TestOS 42 (ostree:testos:0)$"
+assert_file_has_content sysroot/boot/loader/entries/ostree-4.conf "^title TestOS 42 (ostree:testos:0)$"
 
 echo "ok no duplicate version strings in title"
 

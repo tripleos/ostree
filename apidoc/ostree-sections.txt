@@ -191,6 +191,7 @@ ostree_deployment_get_origin_relpath
 ostree_deployment_get_unlocked
 ostree_deployment_is_pinned
 ostree_deployment_is_staged
+ostree_deployment_is_finalization_locked
 ostree_deployment_set_index
 ostree_deployment_set_bootserial
 ostree_deployment_set_bootconfig
@@ -434,6 +435,7 @@ OstreeRepoCheckoutOverwriteMode
 ostree_repo_checkout_tree
 ostree_repo_checkout_tree_at
 ostree_repo_checkout_at
+ostree_repo_checkout_composefs
 ostree_repo_checkout_gc
 ostree_repo_read_commit
 OstreeRepoListObjectsFlags
@@ -537,6 +539,7 @@ OstreeSePolicyRestoreconFlags
 ostree_sepolicy_restorecon
 ostree_sepolicy_setfscreatecon
 ostree_sepolicy_fscreatecon_cleanup
+ostree_sepolicy_set_null_log
 <SUBSECTION Standard>
 OSTREE_SEPOLICY
 OSTREE_IS_SEPOLICY
@@ -560,6 +563,7 @@ ostree_sysroot_lock_async
 ostree_sysroot_lock_finish
 ostree_sysroot_unlock
 ostree_sysroot_unload
+ostree_sysroot_update_post_copy
 ostree_sysroot_set_mount_namespace_in_use
 ostree_sysroot_is_booted
 ostree_sysroot_get_fd
@@ -579,6 +583,7 @@ ostree_sysroot_repo
 ostree_sysroot_get_repo
 ostree_sysroot_get_staged_deployment
 ostree_sysroot_init_osname
+ostree_sysroot_deployment_kexec_load
 ostree_sysroot_deployment_set_kargs
 ostree_sysroot_deployment_set_kargs_in_place
 ostree_sysroot_deployment_set_mutable
@@ -590,6 +595,7 @@ ostree_sysroot_write_origin_file
 ostree_sysroot_stage_tree
 ostree_sysroot_stage_tree_with_options
 ostree_sysroot_stage_overlay_initrd
+ostree_sysroot_change_finalization
 ostree_sysroot_deploy_tree
 ostree_sysroot_deploy_tree_with_options
 ostree_sysroot_get_merge_deployment

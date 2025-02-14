@@ -517,6 +517,8 @@ typedef OstreeRepoCommitFilterResult (*OstreeRepoCommitFilter) (OstreeRepo *repo
  * 2017.13
  * @OSTREE_REPO_COMMIT_MODIFIER_FLAGS_DEVINO_CANONICAL: If a devino cache hit is found, skip
  * modifier filters (non-directories only); Since: 2017.14
+ * @OSTREE_REPO_COMMIT_MODIFIER_FLAGS_SELINUX_LABEL_V1: For SELinux and other systems, label
+ * /usr/etc as if it was /etc.
  *
  * Flags modifying commit behavior. In bare-user-only mode,
  * @OSTREE_REPO_COMMIT_MODIFIER_FLAGS_CANONICAL_PERMISSIONS and
@@ -532,6 +534,7 @@ typedef enum
   OSTREE_REPO_COMMIT_MODIFIER_FLAGS_ERROR_ON_UNLABELED = (1 << 3),
   OSTREE_REPO_COMMIT_MODIFIER_FLAGS_CONSUME = (1 << 4),
   OSTREE_REPO_COMMIT_MODIFIER_FLAGS_DEVINO_CANONICAL = (1 << 5),
+  OSTREE_REPO_COMMIT_MODIFIER_FLAGS_SELINUX_LABEL_V1 = (1 << 6),
 } OstreeRepoCommitModifierFlags;
 
 /**
@@ -836,6 +839,11 @@ _OSTREE_PUBLIC
 gboolean ostree_repo_checkout_at (OstreeRepo *self, OstreeRepoCheckoutAtOptions *options,
                                   int destination_dfd, const char *destination_path,
                                   const char *commit, GCancellable *cancellable, GError **error);
+
+_OSTREE_PUBLIC
+gboolean ostree_repo_checkout_composefs (OstreeRepo *self, GVariant *options, int destination_dfd,
+                                         const char *destination_path, const char *checksum,
+                                         GCancellable *cancellable, GError **error);
 
 _OSTREE_PUBLIC
 gboolean ostree_repo_checkout_gc (OstreeRepo *self, GCancellable *cancellable, GError **error);

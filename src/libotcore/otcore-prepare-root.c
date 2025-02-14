@@ -19,6 +19,14 @@
 
 #include "otcore.h"
 
+// This key is used by default if present in the initramfs to verify
+// the signature on the target commit object.  When composefs is
+// in use, the ostree commit metadata will contain the composefs image digest,
+// which can be used to fully verify the target filesystem tree.
+#define BINDING_KEYPATH "/etc/ostree/initramfs-root-binding.key"
+// The kernel argument to configure composefs
+#define CMDLINE_KEY_COMPOSEFS "ostree.prepare-root.composefs"
+
 static bool
 proc_cmdline_has_key_starting_with (const char *cmdline, const char *key)
 {
@@ -69,7 +77,8 @@ otcore_find_proc_cmdline_key (const char *cmdline, const char *key)
 //
 // If invalid data is found, @error will be set.
 gboolean
-otcore_get_ostree_target (const char *cmdline, char **out_target, GError **error)
+otcore_get_ostree_target (const char *cmdline, gboolean *is_aboot, char **out_target,
+                          GError **error)
 {
   g_assert (cmdline);
   g_assert (out_target && *out_target == NULL);
@@ -78,8 +87,14 @@ otcore_get_ostree_target (const char *cmdline, char **out_target, GError **error
 
   // First, handle the Android boot case
   g_autofree char *slot_suffix = otcore_find_proc_cmdline_key (cmdline, "androidboot.slot_suffix");
+  if (is_aboot)
+    *is_aboot = false;
+
   if (slot_suffix)
     {
+      if (is_aboot)
+        *is_aboot = true;
+
       if (strcmp (slot_suffix, "_a") == 0)
         {
           *out_target = g_strdup (slot_a);
@@ -98,6 +113,8 @@ otcore_get_ostree_target (const char *cmdline, char **out_target, GError **error
    */
   if (proc_cmdline_has_key_starting_with (cmdline, "androidboot."))
     {
+      if (is_aboot)
+        *is_aboot = true;
       *out_target = g_strdup (slot_a);
       return TRUE;
     }
@@ -126,13 +143,106 @@ otcore_load_config (int rootfs_fd, const char *filename, GError **error)
       if (fd == -1)
         continue;
 
-      g_print ("Loading %s\n", path);
-
       g_autofree char *buf = glnx_fd_readall_utf8 (fd, NULL, NULL, error);
       if (!buf)
         return NULL;
       if (!g_key_file_load_from_data (ret, buf, -1, 0, error))
         return NULL;
+    }
+
+  return g_steal_pointer (&ret);
+}
+
+void
+otcore_free_composefs_config (ComposefsConfig *config)
+{
+  g_clear_pointer (&config->pubkeys, g_ptr_array_unref);
+  g_free (config->signature_pubkey);
+  g_free (config);
+}
+
+// Parse the [composefs] section of the prepare-root.conf.
+ComposefsConfig *
+otcore_load_composefs_config (const char *cmdline, GKeyFile *config, gboolean load_keys,
+                              GError **error)
+{
+  g_assert (cmdline);
+  g_assert (config);
+
+  GLNX_AUTO_PREFIX_ERROR ("Loading composefs config", error);
+
+  g_autoptr (ComposefsConfig) ret = g_new0 (ComposefsConfig, 1);
+
+  g_autofree char *enabled = g_key_file_get_value (config, OTCORE_PREPARE_ROOT_COMPOSEFS_KEY,
+                                                   OTCORE_PREPARE_ROOT_ENABLED_KEY, NULL);
+  if (g_strcmp0 (enabled, "signed") == 0)
+    {
+      ret->enabled = OT_TRISTATE_YES;
+      ret->require_verity = true;
+      ret->is_signed = true;
+    }
+  else if (g_strcmp0 (enabled, "verity") == 0)
+    {
+      ret->enabled = OT_TRISTATE_YES;
+      ret->require_verity = true;
+      ret->is_signed = false;
+    }
+  else if (!ot_keyfile_get_tristate_with_default (config, OTCORE_PREPARE_ROOT_COMPOSEFS_KEY,
+                                                  OTCORE_PREPARE_ROOT_ENABLED_KEY, OT_TRISTATE_NO,
+                                                  &ret->enabled, error))
+    return NULL;
+
+  // Look for a key - we default to the initramfs binding path.
+  if (!ot_keyfile_get_value_with_default (config, OTCORE_PREPARE_ROOT_COMPOSEFS_KEY,
+                                          OTCORE_PREPARE_ROOT_KEYPATH_KEY, BINDING_KEYPATH,
+                                          &ret->signature_pubkey, error))
+    return NULL;
+
+  if (ret->is_signed && load_keys)
+    {
+      ret->pubkeys = g_ptr_array_new_with_free_func ((GDestroyNotify)g_bytes_unref);
+
+      g_autofree char *pubkeys = NULL;
+      gsize pubkeys_size;
+
+      /* Load keys */
+
+      if (!g_file_get_contents (ret->signature_pubkey, &pubkeys, &pubkeys_size, error))
+        return glnx_prefix_error_null (error, "Reading public key file '%s'",
+                                       ret->signature_pubkey);
+
+      g_auto (GStrv) lines = g_strsplit (pubkeys, "\n", -1);
+      for (char **iter = lines; *iter; iter++)
+        {
+          const char *line = *iter;
+          if (!*line)
+            continue;
+
+          gsize pubkey_size;
+          g_autofree guchar *pubkey = g_base64_decode (line, &pubkey_size);
+          g_ptr_array_add (ret->pubkeys, g_bytes_new_take (g_steal_pointer (&pubkey), pubkey_size));
+        }
+
+      if (ret->pubkeys->len == 0)
+        return glnx_null_throw (error, "public key file specified, but no public keys found");
+    }
+
+  g_autofree char *ostree_composefs = otcore_find_proc_cmdline_key (cmdline, CMDLINE_KEY_COMPOSEFS);
+  if (ostree_composefs)
+    {
+      if (g_strcmp0 (ostree_composefs, "signed") == 0)
+        {
+          ret->enabled = OT_TRISTATE_YES;
+          ret->is_signed = true;
+          ret->require_verity = true;
+        }
+      else
+        {
+          // The other states force off signatures
+          ret->is_signed = false;
+          if (!_ostree_parse_tristate (ostree_composefs, &ret->enabled, error))
+            return glnx_prefix_error (error, "handling karg " CMDLINE_KEY_COMPOSEFS), NULL;
+        }
     }
 
   return g_steal_pointer (&ret);

@@ -23,15 +23,18 @@
 
 #include "ot-admin-builtins.h"
 #include "ot-admin-functions.h"
-#include "ot-main.h"
 #include "otutil.h"
 
 #include <glib/gi18n.h>
 
 static gboolean opt_modern;
+static gint opt_epoch;
 
 static GOptionEntry options[]
     = { { "modern", 0, 0, G_OPTION_ARG_NONE, &opt_modern, "Only create /boot and /ostree", NULL },
+        { "epoch", 'E', 0, G_OPTION_ARG_INT, &opt_epoch,
+          "An integer value, defines initial state.  Must be in the range [0-1], inclusive.",
+          NULL },
         { NULL } };
 
 gboolean
@@ -63,12 +66,19 @@ ot_admin_builtin_init_fs (int argc, char **argv, OstreeCommandInvocation *invoca
   if (!glnx_shutil_mkdir_p_at (root_dfd, "boot", 0755, cancellable, error))
     return FALSE;
 
+  if (opt_epoch < 0)
+    return glnx_throw (error, "Invalid epoch: %d", opt_epoch);
+
+  /* --modern is equivalent to --epoch=1 */
+  if (opt_modern && opt_epoch == 0)
+    opt_epoch = 1;
+
   /* See https://github.com/coreos/coreos-assembler/pull/688
    * For Fedora CoreOS at least, we have this now to the point where we don't
    * need this stuff in the physical sysroot.  I'm not sure we ever really did,
    * but to be conservative, make it opt-in to the new model of just boot/ and ostree/.
    */
-  if (!opt_modern)
+  if (opt_epoch == 0)
     {
       const char *traditional_toplevels[] = { "boot", "dev", "home", "proc", "run", "sys" };
       for (guint i = 0; i < G_N_ELEMENTS (traditional_toplevels); i++)
@@ -88,6 +98,14 @@ ot_admin_builtin_init_fs (int argc, char **argv, OstreeCommandInvocation *invoca
           glnx_set_prefix_error_from_errno (error, "chmod: %s", "tmp");
           return FALSE;
         }
+    }
+  else if (opt_epoch == 2)
+    {
+      /* In epoch 2, ostree is 0700 - no access from unprivileged code.  See
+       * https://github.com/ostreedev/ostree/issues/3211
+       */
+      if (!glnx_shutil_mkdir_p_at (root_dfd, "ostree", 0700, cancellable, error))
+        return FALSE;
     }
 
   g_autoptr (GFile) dir = g_file_new_for_path (sysroot_path);

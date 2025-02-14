@@ -73,6 +73,7 @@ _installed_or_uninstalled_test_scripts = \
 	tests/test-remote-headers.sh \
 	tests/test-remote-refs.sh \
 	tests/test-composefs.sh \
+	tests/test-payload-link.sh \
 	tests/test-commit-sign.sh \
 	tests/test-commit-timestamp.sh \
 	tests/test-export.sh \
@@ -104,6 +105,8 @@ _installed_or_uninstalled_test_scripts = \
 	tests/test-admin-upgrade-systemd-update.sh \
 	tests/test-admin-deploy-syslinux.sh \
 	tests/test-admin-deploy-bootprefix.sh \
+	tests/test-admin-deploy-composefs.sh \
+	tests/test-admin-deploy-var.sh \
 	tests/test-admin-deploy-2.sh \
 	tests/test-admin-deploy-karg.sh \
 	tests/test-admin-deploy-switch.sh \
@@ -123,6 +126,7 @@ _installed_or_uninstalled_test_scripts = \
 	tests/test-admin-locking.sh \
 	tests/test-admin-deploy-clean.sh \
 	tests/test-admin-kargs.sh \
+        tests/test-admin-stateroot.sh \
 	tests/test-reset-nonlinear.sh \
 	tests/test-oldstyle-partial.sh \
 	tests/test-delta.sh \

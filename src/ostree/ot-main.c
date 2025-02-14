@@ -24,6 +24,7 @@
 #include <gio/gio.h>
 
 #include <locale.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
@@ -31,7 +32,6 @@
 
 #include "ostree.h"
 #include "ot-admin-functions.h"
-#include "ot-main.h"
 #include "otutil.h"
 
 static char *opt_repo;
@@ -116,7 +116,7 @@ maybe_setup_mount_namespace (gboolean *out_ns, GError **error)
   *out_ns = FALSE;
 
   /* If we're not root, then we almost certainly can't be remounting anything */
-  if (getuid () != 0)
+  if (!ot_util_process_privileged ())
     return TRUE;
 
   /* If the system isn't booted via libostree, also nothing to do */
@@ -511,6 +511,11 @@ ostree_option_context_parse (GOptionContext *context, const GOptionEntry *main_e
 
   if (opt_version)
     {
+      /* Ignore SIGPIPE so that piping the output to grep or similar
+       * doesn't cause the process to fail. */
+      if (signal (SIGPIPE, SIG_IGN) == SIG_ERR)
+        return glnx_throw_errno_prefix (error, "Ignoring SIGPIPE");
+
       /* This should now be YAML, like `docker version`, so it's both nice to read
        * possible to parse */
       g_auto (GStrv) features = g_strsplit (OSTREE_FEATURES, " ", -1);
@@ -575,7 +580,7 @@ ostree_admin_sysroot_load (OstreeSysroot *sysroot, OstreeAdminBuiltinFlags flags
       /* Only require root if we're manipulating a booted sysroot. (Mostly
        * useful for the test suite)
        */
-      if (booted && getuid () != 0)
+      if (booted && !ot_util_process_privileged ())
         {
           g_set_error (error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED,
                        "You must be root to perform this command");
@@ -607,6 +612,9 @@ ostree_admin_option_context_parse (GOptionContext *context, const GOptionEntry *
       /* Early return if no sysroot is requested */
       return TRUE;
     }
+
+  // Disable this, it's just noise
+  ostree_sepolicy_set_null_log ();
 
   g_autoptr (GFile) sysroot_path = NULL;
   if (opt_sysroot != NULL)

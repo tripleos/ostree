@@ -1,5 +1,5 @@
 ---
-nav_order: 19
+nav_order: 190
 ---
 
 # Contributing
@@ -7,6 +7,8 @@ nav_order: 19
 
 1. TOC
 {:toc}
+
+<!-- SPDX-License-Identifier: (CC-BY-SA-3.0 OR GFDL-1.3-or-later) -->
 
 ## Submitting patches
 

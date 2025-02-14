@@ -1,5 +1,5 @@
 ---
-nav_order: 5
+nav_order: 50
 ---
 
 # Atomic Upgrades
@@ -7,6 +7,8 @@ nav_order: 5
 
 1. TOC
 {:toc}
+
+<!-- SPDX-License-Identifier: (CC-BY-SA-3.0 OR GFDL-1.3-or-later) -->
 
 ## You can turn off the power anytime you want...
 
@@ -141,5 +143,18 @@ Each bootloader entry has a special `ostree=` argument which refers to
 one of these symbolic links.  This is parsed at runtime in the
 initramfs.
 
-###### Licensing for this document:
-`SPDX-License-Identifier: (CC-BY-SA-3.0 OR GFDL-1.3-or-later)`
+## The /boot/ostree directory
+
+There is also a `/boot/ostree` directory which is where ostree will
+install kernel data (including the initramfs).  In order to
+deduplicate across deployments, the kernel state is hashed (again
+with sha256), resulting in a directory like `/boot/ostree/<stateroot>-<checksum>`;
+this is what the bootloader entries will use.
+
+However, this is an implementation detail and may change in the
+future.  As a tool which wants to find kernel for a given root, instead look
+in `/usr/lib/modules/$kver`; this is how OSTree itself finds
+the kernel to "deploy" by copying it into `/boot`.
+
+Note that if `/boot` is on the same partition as `/`, then OSTree
+will just hardlink instead of copying.

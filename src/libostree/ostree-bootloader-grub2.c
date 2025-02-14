@@ -22,9 +22,15 @@
 #include "otutil.h"
 #include <gio/gfiledescriptorbased.h>
 #include <gio/gunixoutputstream.h>
+#include <stdbool.h>
+#include <string.h>
 #include <sys/mount.h>
 
-#include <string.h>
+// Written by bootupd
+#define BOOTUPD_CONFIG "boot/bootupd-state.json"
+// Horrible hack, to avoid including a JSON parser we just grep for this
+#define BOOTUPD_CONFIG_STATIC_JSON_FRAGMENT "\"static-configs\""
+#define BOOTUPD_CONFIG_STATIC_JSON_FRAGMENT_NULL "\"static-configs\":null"
 
 /* Maintain backwards compatibility with legacy GRUB
  * installations that might rely on the -16 suffix
@@ -74,6 +80,25 @@ _ostree_bootloader_grub2_query (OstreeBootloader *bootloader, gboolean *out_is_a
                                 GCancellable *cancellable, GError **error)
 {
   OstreeBootloaderGrub2 *self = OSTREE_BOOTLOADER_GRUB2 (bootloader);
+
+  g_autoptr (GFile) bootupd_config
+      = g_file_resolve_relative_path (self->sysroot->path, BOOTUPD_CONFIG);
+  if (g_file_query_exists (bootupd_config, NULL))
+    {
+      g_autofree char *bootupd_config_contents = NULL;
+      if (!g_file_load_contents (bootupd_config, cancellable, &bootupd_config_contents, NULL, NULL,
+                                 error))
+        return glnx_prefix_error (error, "Failed to read bootupd config");
+      if (strstr (bootupd_config_contents, BOOTUPD_CONFIG_STATIC_JSON_FRAGMENT) != NULL)
+        {
+          if (strstr (bootupd_config_contents, BOOTUPD_CONFIG_STATIC_JSON_FRAGMENT_NULL) == NULL)
+            {
+              g_debug ("Found static bootupd config");
+              *out_is_active = FALSE;
+              return TRUE;
+            }
+        }
+    }
 
   /* Look for the BIOS path first */
   if (g_file_query_exists (self->config_path_bios_1, NULL)
@@ -398,7 +423,15 @@ _ostree_bootloader_grub2_write_config (OstreeBootloader *bootloader, int bootver
   grub_argv[2] = gs_file_get_path_cached (new_config_path);
 
   GSpawnFlags grub_spawnflags = G_SPAWN_SEARCH_PATH;
-  if (!g_getenv ("OSTREE_DEBUG_GRUB2"))
+  const bool running_in_systemd = getenv ("INVOCATION_ID") != NULL;
+  const bool debug_grub2 = g_getenv ("OSTREE_DEBUG_GRUB2");
+  /* If we're running in systemd (as part of `ostree-finalize-staged.service`)
+   * then we do want to gather output from the binary so that if something fails
+   * we can debug it.
+   *
+   * We also have an opt-in variable to display errors.
+   */
+  if (!(running_in_systemd || debug_grub2))
     grub_spawnflags |= G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL;
   cdata.root = grub2_mkconfig_chroot;
   g_autofree char *bootversion_str = g_strdup_printf ("%u", (guint)bootversion);

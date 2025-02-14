@@ -122,6 +122,16 @@ License along with this library. If not, see <https://www.gnu.org/licenses/>.
             </varlistentry>
 
             <varlistentry>
+                <term><option>--lock-finalization</option></term>
+
+                <listitem><para>
+                    The deployment will not be "finalized" by default on shutdown; to later
+                    queue it, use <literal>ostree admin lock-finalization --unlock</literal>.
+                </para></listitem>
+            </varlistentry>
+
+
+            <varlistentry>
                 <term><option>--karg-proc-cmdline</option></term>
 
                 <listitem><para>
@@ -142,6 +152,14 @@ License along with this library. If not, see <https://www.gnu.org/licenses/>.
 
                 <listitem><para>
                     Append kernel argument; useful with e.g. console= that can be used multiple times.
+                </para></listitem>
+            </varlistentry>
+
+            <varlistentry>
+                <term><option>--karg-delete</option>="NAME=VALUE"</term>
+
+                <listitem><para>
+                    Delete kernel argument if exists, can be used multiple times.
                 </para></listitem>
             </varlistentry>
         </variablelist>

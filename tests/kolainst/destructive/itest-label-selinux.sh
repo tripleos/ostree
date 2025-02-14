@@ -17,20 +17,48 @@ assert_not_has_file "${testbin}"
 # Make a test binary that we label as shell_exec_t on disk, but should be
 # reset by --selinux-policy back to bin_t
 echo 'test foo' > ${testbin}
+# Extend it with some real data to help test reflinks
+cat < /usr/bin/bash >> "${testbin}"
+# And set its label
 chcon --reference co/usr/bin/true ${testbin}
+# Now at this point, it should not have shared extents
+filefrag -v "${testbin}" > out.txt
+assert_not_file_has_content out.txt shared
+rm -f out.txt
 oldcon=$(getfattr --only-values -m security.selinux ${testbin})
 chcon --reference co/usr/bin/bash ${testbin}
 newcon=$(getfattr --only-values -m security.selinux ${testbin})
 assert_not_streq "${oldcon}" "${newcon}"
+# Ensure the tmpdir isn't pruned
+touch co
 ostree commit -b testbranch --link-checkout-speedup \
        --selinux-policy co --tree=dir=co
 ostree ls -X testbranch /usr/bin/foo-a-generic-binary > ls.txt
 assert_file_has_content ls.txt ${oldcon}
 ostree fsck
+# Additionally, the commit process should have reflinked our input
+filefrag -v "${testbin}" > out.txt
+assert_file_has_content out.txt shared
+rm -f out.txt
 
 ostree refs --delete testbranch
 rm co -rf
 echo "ok commit with sepolicy"
+
+ostree ls -X ${host_refspec} /usr/etc/sysctl.conf > ls.txt
+if grep -qF ':etc_t:' ls.txt; then
+  ostree checkout -H ${host_refspec} co
+  ostree commit -b testbranch --link-checkout-speedup \
+       --selinux-policy co --tree=dir=co --selinux-labeling-epoch=1
+  ostree ls -X testbranch /usr/etc/sysctl.conf > ls.txt
+  assert_file_has_content ls.txt ':system_conf_t:'
+  rm co ls.txt -rf
+  ostree refs --delete testbranch
+else
+  echo 'Already using --selinux-labeling-epoch > 0 on host, hopefully!'
+fi
+
+echo "ok --selinux-labeling-epoch=1"
 
 # Now let's check that selinux policy labels can be applied on checkout
 

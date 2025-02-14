@@ -1,5 +1,10 @@
 // Documentation: https://github.com/coreos/coreos-ci/blob/main/README-upstream-ci.md
 
+properties([
+  // abort previous runs when a PR is updated to save resources
+  disableConcurrentBuilds(abortPrevious: true)
+])
+
 stage("Build") {
   def n = 5
   buildPod(memory: "2Gi", cpu: "${n}") {
@@ -13,7 +18,7 @@ stage("Build") {
           git fetch origin --tags
           git submodule update --init
 
-          env MAKE_JOBS=${n} SKIP_INSTALLDEPS=1 ./ci/build.sh
+          env MAKE_JOBS=${n} ./ci/build.sh
         """)
       }
       stage("Unit tests") {

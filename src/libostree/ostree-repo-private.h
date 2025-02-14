@@ -33,7 +33,6 @@ G_BEGIN_DECLS
 #define _OSTREE_SUMMARY_CACHE_DIR "summaries"
 #define _OSTREE_CACHE_DIR "cache"
 
-#define _OSTREE_MAX_OUTSTANDING_FETCHER_REQUESTS 8
 #define _OSTREE_MAX_OUTSTANDING_DELTAPART_REQUESTS 2
 
 /* We want some parallelism with disk writes, but we also
@@ -413,6 +412,9 @@ gboolean _ostree_tmpf_fsverity_core (GLnxTmpfile *tmpf, _OstreeFeatureSupport fs
 gboolean _ostree_tmpf_fsverity (OstreeRepo *self, GLnxTmpfile *tmpf, GBytes *signature,
                                 GError **error);
 
+gboolean _ostree_ensure_fsverity (OstreeRepo *self, gboolean allow_enoent, int dirfd,
+                                  const char *path, gboolean *supported, GError **error);
+
 gboolean _ostree_repo_verify_bindings (const char *collection_id, const char *ref_name,
                                        GVariant *commit, GError **error);
 
@@ -471,9 +473,16 @@ gboolean ostree_composefs_target_write (OstreeComposefsTarget *target, int fd,
                                         guchar **out_fsverity_digest, GCancellable *cancellable,
                                         GError **error);
 
-gboolean ostree_repo_checkout_composefs (OstreeRepo *self, OstreeComposefsTarget *target,
-                                         OstreeRepoFile *source, GCancellable *cancellable,
-                                         GError **error);
+gboolean _ostree_repo_checkout_composefs (OstreeRepo *self, OtTristate verity,
+                                          OstreeComposefsTarget *target, OstreeRepoFile *source,
+                                          GCancellable *cancellable, GError **error);
+static inline gboolean
+composefs_not_supported (GError **error)
+{
+  g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+               "composefs is not supported in this ostree build");
+  return FALSE;
+}
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (OstreeComposefsTarget, ostree_composefs_target_unref)
 

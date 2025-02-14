@@ -3,6 +3,7 @@
 dn=$(cd $(dirname $0) && pwd)
 
 OS_ID=$(. /etc/os-release; echo $ID)
+OS_ID_LIKE=$(. /etc/os-release; echo $ID ${ID_LIKE:-})
 OS_VERSION_ID=$(. /etc/os-release; echo $VERSION_ID)
 
 pkg_upgrade() {
@@ -37,6 +38,9 @@ pkg_install_buildroot() {
     case "${OS_ID}" in
         fedora)
             pkg_install dnf-plugins-core @buildsys-build;;
+        centos)
+            # Sadly this stuff is actually hardcoded in *Python code* in mock...
+            dnf -y install make gcc;;
         *) fatal "pkg_install_buildroot(): Unhandled OS ${OS_ID}";;
     esac
 }

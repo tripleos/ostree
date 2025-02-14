@@ -84,6 +84,7 @@ struct OstreeFetcher
   char *user_agent;
 
   guint64 bytes_transferred;
+  guint32 opt_max_outstanding_fetcher_requests;
 };
 
 enum
@@ -380,6 +381,31 @@ _ostree_fetcher_set_extra_user_agent (OstreeFetcher *self, const char *extra_use
     self->user_agent = g_strdup_printf ("%s %s", OSTREE_FETCHER_USERAGENT_STRING, extra_user_agent);
 }
 
+void
+_ostree_fetcher_set_low_speed_time (OstreeFetcher *self, guint32 opt_low_speed_time)
+{
+  // TODO
+}
+
+void
+_ostree_fetcher_set_low_speed_limit (OstreeFetcher *self, guint32 opt_low_speed_limit)
+{
+  // TODO
+}
+
+void
+_ostree_fetcher_set_retry_all (OstreeFetcher *self, gboolean opt_retry_all)
+{
+  // TODO
+}
+
+void
+_ostree_fetcher_set_max_outstanding_fetcher_requests (OstreeFetcher *self,
+                                                      guint32 opt_max_outstanding_fetcher_requests)
+{
+  self->opt_max_outstanding_fetcher_requests = opt_max_outstanding_fetcher_requests;
+}
+
 static gboolean
 finish_stream (FetcherRequest *request, GCancellable *cancellable, GError **error)
 {
@@ -595,7 +621,7 @@ on_request_sent (GObject *object, GAsyncResult *result, gpointer user_data)
             {
               g_autofree char *uristring
                   = g_uri_to_string (soup_message_get_uri (request->message));
-              GIOErrorEnum code = _ostree_fetcher_http_status_code_to_io_error (status);
+              GIOErrorEnum code = _ostree_fetcher_http_status_code_to_io_error (status, FALSE);
               {
                 g_autofree char *errmsg = g_strdup_printf ("Server returned status %u: %s", status,
                                                            soup_status_get_phrase (status));
@@ -667,7 +693,7 @@ create_soup_session (OstreeFetcher *self)
   const char *user_agent = self->user_agent ?: OSTREE_FETCHER_USERAGENT_STRING;
   SoupSession *session = soup_session_new_with_options (
       "user-agent", user_agent, "timeout", 60, "idle-timeout", 60, "max-conns-per-host",
-      _OSTREE_MAX_OUTSTANDING_FETCHER_REQUESTS, NULL);
+      self->opt_max_outstanding_fetcher_requests, NULL);
 
   /* SoupContentDecoder is included in the session by default. Remove it
    * if gzip compression isn't in use.

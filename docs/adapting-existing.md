@@ -1,5 +1,5 @@
 ---
-nav_order: 6
+nav_order: 70
 ---
 
 # Adapting existing mainstream distributions
@@ -7,6 +7,8 @@ nav_order: 6
 
 1. TOC
 {:toc}
+
+<!-- SPDX-License-Identifier: (CC-BY-SA-3.0 OR GFDL-1.3-or-later) -->
 
 ## System layout
 
@@ -68,6 +70,10 @@ d /var/usrlocal/src 0755 root root -
 d /var/mnt 0755 root root -
 d /run/media 0755 root root -
 ```
+
+However, as of OSTree 2023.9 there is support for a `root.transient`
+model, which can increase compatibility in some scenarios.  For more
+information, see `man ostree-prepare-root.conf`.
 
 Particularly note here the double indirection of `/home`.  By default,
 each deployment will share the global toplevel `/home` directory on
@@ -196,6 +202,3 @@ Then to actually deploy this tree for the next boot:
 
 This is essentially what [rpm-ostree](https://github.com/projectatomic/rpm-ostree/)
 does to support its [package layering model](https://rpm-ostree.readthedocs.io/en/latest/manual/administrator-handbook/#hybrid-imagepackaging-via-package-layering).
-
-###### Licensing for this document:
-`SPDX-License-Identifier: (CC-BY-SA-3.0 OR GFDL-1.3-or-later)`

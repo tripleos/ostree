@@ -1,5 +1,7 @@
 use crate::gio;
 use crate::Sysroot;
+#[cfg(any(feature = "v2017_10", feature = "dox"))]
+use std::os::fd::BorrowedFd;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, Default)]
@@ -62,8 +64,18 @@ impl SysrootBuilder {
     }
 }
 
+impl Sysroot {
+    /// Borrow the directory file descriptor for this sysroot.
+    #[cfg(feature = "v2017_10")]
+    pub fn dfd_borrow(&self) -> BorrowedFd {
+        unsafe { BorrowedFd::borrow_raw(self.fd()) }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use gio::prelude::FileExt;
+
     use super::*;
 
     #[test]
@@ -102,6 +114,6 @@ mod tests {
 
             sysroot.path()
         };
-        assert_eq!(path_created.to_string(), path_loaded.to_string());
+        assert_eq!(path_created.path(), path_loaded.path());
     }
 }

@@ -1,7 +1,7 @@
 AC_PREREQ([2.63])
 dnl To perform a release, follow the instructions in `docs/CONTRIBUTING.md`.
-m4_define([year_version], [2023])
-m4_define([release_version], [7])
+m4_define([year_version], [2025])
+m4_define([release_version], [2])
 m4_define([package_version], [year_version.release_version])
 AC_INIT([libostree], [package_version], [walters@verbum.org])
 is_release_build=no
@@ -85,7 +85,8 @@ LT_INIT([disable-static])
 dnl We have an always-on feature now to signify the fix for 
 dnl https://github.com/ostreedev/ostree/pull/2874/commits/de6fddc6adee09a93901243dc7074090828a1912
 dnl "commit: fix ostree deployment on 64-bit inode fs"
-OSTREE_FEATURES="inode64"
+dnl initial-var signifies this version of ostree propagates /var
+OSTREE_FEATURES="inode64 initial-var"
 AC_SUBST([OSTREE_FEATURES])
 
 GLIB_TESTS
@@ -97,6 +98,9 @@ AC_STRUCT_TIMEZONE
 AC_CHECK_HEADER([sys/xattr.h],,[AC_MSG_ERROR([You must have sys/xattr.h from glibc])])
 
 AS_IF([test "$YACC" != "bison -y"], [AC_MSG_ERROR([bison not found but required])])
+
+AC_SUBST([LIBS_PRIVATE])
+AC_SUBST([REQUIRES_PRIVATE])
 
 PKG_PROG_PKG_CONFIG
 
@@ -120,10 +124,14 @@ GIO_DEPENDENCY="gio-unix-2.0 >= 2.66.0"
 PKG_CHECK_MODULES(OT_DEP_GIO_UNIX, $GIO_DEPENDENCY)
 
 dnl 5.1.0 is an arbitrary version here
-PKG_CHECK_MODULES(OT_DEP_LZMA, liblzma >= 5.0.5)
+LIBLZMA_DEPENDENCY="liblzma >= 5.0.5"
+PKG_CHECK_MODULES(OT_DEP_LZMA, $LIBLZMA_DEPENDENCY)
+REQUIRES_PRIVATE="${LIBLZMA_DEPENDENCY}"
 
 dnl Needed for rollsum
-PKG_CHECK_MODULES(OT_DEP_ZLIB, zlib)
+ZLIB_DEPENDENCY=zlib
+PKG_CHECK_MODULES(OT_DEP_ZLIB, $ZLIB_DEPENDENCY)
+REQUIRES_PRIVATE="${REQUIRES_PRIVATE} ${ZLIB_DEPENDENCY}"
 
 dnl We're not actually linking to this, just using the header
 PKG_CHECK_MODULES(OT_DEP_E2P, e2p)
@@ -155,17 +163,26 @@ AS_IF([test x$enable_http2 != xno ], [
 SOUP3_DEPENDENCY="libsoup-3.0 >= 3.0.0"
 AC_ARG_WITH(soup3,
 	    AS_HELP_STRING([--with-soup3], [Use libsoup3 @<:@default=no@:>@]),
-	    [], [with_soup3=no])
+	    [], [with_soup3=check])
 AS_IF([test x$with_soup3 != xno], [
-    PKG_CHECK_MODULES(OT_DEP_SOUP3, $SOUP3_DEPENDENCY)
-    with_soup3=yes
-    AC_DEFINE([HAVE_LIBSOUP3], 1, [Define if we have libsoup3])
-    OSTREE_FEATURES="$OSTREE_FEATURES libsoup3"
-    with_soup_default=no
-    dnl soup3 always supports client certs
-    have_libsoup_client_certs=yes
+    AC_MSG_CHECKING([for $SOUP3_DEPENDENCY])
+    PKG_CHECK_EXISTS($SOUP3_DEPENDENCY, have_soup3=yes, have_soup3=no)
+    AC_MSG_RESULT([$have_soup3])
+    AS_IF([ test x$have_soup3 = xno && test x$with_soup3 != xcheck], [
+       AC_MSG_ERROR([libsoup3 is enabled but could not be found])
+    ])
+    AS_IF([test x$have_soup3 = xyes], [
+      with_soup3=yes
+      PKG_CHECK_MODULES(OT_DEP_SOUP3, $SOUP3_DEPENDENCY)
+      AC_DEFINE([HAVE_LIBSOUP3], 1, [Define if we have libsoup3])
+      OSTREE_FEATURES="$OSTREE_FEATURES libsoup3"
+      dnl And disable libsoup2
+      with_soup_default=no
+      dnl soup3 always supports client certs
+      have_libsoup_client_certs=yes
+    ], [with_soup3=no])
 ], [with_soup_default=check])
-AM_CONDITIONAL(USE_LIBSOUP3, test x$with_soup3 != xno)
+AM_CONDITIONAL(USE_LIBSOUP3, test x$with_soup3 = xyes)
 
 dnl When bumping the libsoup-2.4 dependency, remember to bump
 dnl SOUP_VERSION_MIN_REQUIRED and SOUP_VERSION_MAX_ALLOWED in
@@ -221,10 +238,16 @@ AS_IF([test x$with_curl = xyes && test x$with_soup = xno && test x$with_soup3 = 
 AM_CONDITIONAL(USE_CURL_OR_SOUP, test x$with_curl != xno || test x$with_soup != xno || test x$with_soup3 != xno)
 AS_IF([test x$with_curl != xno || test x$with_soup != xno || test x$with_soup3 != xno],
             [AC_DEFINE([HAVE_LIBCURL_OR_LIBSOUP], 1, [Define if we have soup or curl])])
-AS_IF([test x$with_curl = xyes], [fetcher_backend=curl],
-      [test x$with_soup = xyes], [fetcher_backend=libsoup],
-      [test x$with_soup3 = xyes], [fetcher_backend=libsoup3],
-      [fetcher_backend=none])
+AS_IF([test x$with_curl = xyes], [
+  fetcher_backend=curl
+  REQUIRES_PRIVATE="${REQUIRES_PRIVATE} libcurl >= $CURL_DEPENDENCY"
+], [test x$with_soup = xyes], [
+  fetcher_backend=libsoup
+  REQUIRES_PRIVATE="${REQUIRES_PRIVATE} ${SOUP_DEPENDENCY}"
+], [test x$with_soup3 = xyes], [
+  fetcher_backend=libsoup3
+  REQUIRES_PRIVATE="${REQUIRES_PRIVATE} ${SOUP3_DEPENDENCY}"
+], [fetcher_backend=none])
 
 m4_ifdef([GOBJECT_INTROSPECTION_CHECK], [
   GOBJECT_INTROSPECTION_CHECK([1.51.5])
@@ -238,25 +261,37 @@ AC_ARG_WITH(gpgme,
 	    [], [with_gpgme=yes])
 AS_IF([test x$with_gpgme != xno], [
     have_gpgme=yes
-    PKG_CHECK_MODULES([OT_DEP_GPGME], [gpgme >= $LIBGPGME_DEPENDENCY gpg-error], [have_gpgme=yes], [have_gpgme=no])
+    PKG_CHECK_MODULES([OT_DEP_GPGME], [gpgme >= $LIBGPGME_DEPENDENCY gpg-error], [
+        have_gpgme=yes
+        REQUIRES_PRIVATE="${REQUIRES_PRIVATE} gpgme >= $LIBGPGME_DEPENDENCY gpg-error"
+        ], [have_gpgme=no])
     ]
 )
 AS_IF([test x$with_gpgme != xno && test x$have_gpgme != xyes], [
-    PKG_CHECK_MODULES(OT_DEP_GPGME, gpgme-pthread >= $LIBGPGME_PTHREAD_DEPENDENCY, have_gpgme=yes, [
+    PKG_CHECK_MODULES(OT_DEP_GPGME, gpgme-pthread >= $LIBGPGME_PTHREAD_DEPENDENCY, [
+        have_gpgme=yes
+        REQUIRES_PRIVATE="${REQUIRES_PRIVATE} gpgme-pthread >= $LIBGPGME_PTHREAD_DEPENDENCY"
+    ], [
         m4_ifdef([AM_PATH_GPGME_PTHREAD], [
-            AM_PATH_GPGME_PTHREAD($LIBGPGME_PTHREAD_DEPENDENCY, have_gpgme=yes, have_gpgme=no)
+            AM_PATH_GPGME_PTHREAD($LIBGPGME_PTHREAD_DEPENDENCY, [
+                have_gpgme=yes
+		LIBS_PRIVATE="${LIBS_PRIVATE:+$LIBS_PRIVATE }${GPGME_PTHREAD_LIBS}"
+            ], have_gpgme=no)
         ],[ have_gpgme=no ])
     ])
     AS_IF([ test x$have_gpgme = xno ], [
        AC_MSG_ERROR([Need GPGME_PTHREAD version $LIBGPGME_PTHREAD_DEPENDENCY or later])
     ])
     OSTREE_FEATURES="$OSTREE_FEATURES gpgme"
-    PKG_CHECK_MODULES(OT_DEP_GPG_ERROR, [gpg-error], [], [
+    PKG_CHECK_MODULES(OT_DEP_GPG_ERROR, [gpg-error], [
+        REQUIRES_PRIVATE="${REQUIRES_PRIVATE} gpg-error"
+    ], [
 dnl This apparently doesn't ship a pkg-config file either, and we need
 dnl to link to it directly.
         AC_PATH_PROG(GPG_ERROR_CONFIG, [gpg-error-config], [AC_MSG_ERROR([Missing gpg-error-config])])
         OT_DEP_GPG_ERROR_CFLAGS="$( $GPG_ERROR_CONFIG --cflags )"
         OT_DEP_GPG_ERROR_LIBS="$( $GPG_ERROR_CONFIG --libs )"
+        LIBS_PRIVATE="${LIBS_PRIVATE:+$LIBS_PRIVATE }${OT_DEP_GPG_ERROR_LIBS}"
     ])
     OT_DEP_GPGME_CFLAGS="${OT_DEP_GPGME_CFLAGS} ${OT_DEP_GPG_ERROR_CFLAGS}"
     OT_DEP_GPGME_LIBS="${OT_DEP_GPGME_LIBS} ${OT_DEP_GPG_ERROR_LIBS}"
@@ -274,50 +309,26 @@ AS_IF([test x$have_gpgme = xyes],
 )
 AM_CONDITIONAL(USE_GPGME, test "x$have_gpgme" = xyes)
 
-dnl composefs won't work at all without this
-AC_MSG_CHECKING([for MOUNT_ATTR_IDMAP])
-AC_COMPILE_IFELSE(
-	[AC_LANG_PROGRAM([
-			#include <sys/mount.h>
-			#include <linux/mount.h>
-  ],[int foo = MOUNT_ATTR_IDMAP;]
-	)],
-	[AC_MSG_RESULT(yes)
-	 have_mount_attr_idmap=yes],
-	[AC_MSG_RESULT(no)])
-dnl These are needed by libcomposefs to use the new mount API optionally
-AC_MSG_CHECKING([for new mount API (fsconfig)])
-AC_COMPILE_IFELSE(
-	[AC_LANG_SOURCE([[
-			#include <sys/mount.h>
-			int cmd = FSCONFIG_CMD_CREATE;
-	]])],
-	[AC_MSG_RESULT(yes)
-		 AC_DEFINE([HAVE_FSCONFIG_CMD_CREATE_SYS_MOUNT_H], 1, [Define if FSCONFIG_CMD_CREATE is available in sys/mount.h])],
-	[AC_MSG_RESULT(no)])
-AC_COMPILE_IFELSE(
-	[AC_LANG_SOURCE([[
-			/* also make sure it doesn't conflict with <sys/mount.h> since it is always used.  */
-			#include <sys/mount.h>
-			#include <linux/mount.h>
-			int cmd = FSCONFIG_CMD_CREATE;
-	]])],
-	[AC_MSG_RESULT(yes)
-		 AC_DEFINE([HAVE_FSCONFIG_CMD_CREATE_LINUX_MOUNT_H], 1, [Define if FSCONFIG_CMD_CREATE is available in linux/mount.h])],
-	[AC_MSG_RESULT(no)])
-
-composefs_default=yes
-if test x"$have_mount_attr_idmap" != xyes; then
-  composefs_default=no
-fi
 AC_ARG_WITH(composefs,
-	    AS_HELP_STRING([--with-composefs], [Support composefs]),
-	    :, with_composefs=$composefs_default)
+	    AS_HELP_STRING([--with-composefs], [Support composefs (default yes)]),
+	    :, with_composefs=maybe)
 
-if test x$with_composefs != xno; then OSTREE_FEATURES="$OSTREE_FEATURES composefs";
-   AC_DEFINE([HAVE_COMPOSEFS], 1, [Define if we have libcomposefs])
-fi
-AM_CONDITIONAL(USE_COMPOSEFS, test $with_composefs != no)
+have_composefs=no
+AS_IF([ test x$with_composefs != xno ], [
+    AC_MSG_CHECKING([for composefs])
+    PKG_CHECK_EXISTS(composefs, have_composefs=yes, have_composefs=no)
+    AC_MSG_RESULT([$have_composefs])
+    AS_IF([ test x$have_composefs = xno && test x$with_composefs != xmaybe ], [
+       AC_MSG_ERROR([composefs is enabled but could not be found])
+    ])
+    AS_IF([ test x$have_composefs = xyes], [
+      PKG_CHECK_MODULES(OT_DEP_COMPOSEFS, [composefs])
+      REQUIRES_PRIVATE="${REQUIRES_PRIVATE} composefs"
+      OSTREE_FEATURES="$OSTREE_FEATURES composefs";
+      AC_DEFINE([HAVE_COMPOSEFS], 1, [Define if we have libcomposefs])
+    ])
+])
+AM_CONDITIONAL(USE_COMPOSEFS, test x$have_composefs = xyes)
 
 LIBSODIUM_DEPENDENCY="1.0.14"
 AC_ARG_WITH(ed25519_libsodium,
@@ -325,9 +336,12 @@ AC_ARG_WITH(ed25519_libsodium,
 	    [], [with_ed25519_libsodium=no])
 AS_IF([test x$with_ed25519_libsodium != xno], [
     AC_DEFINE([HAVE_LIBSODIUM], 1, [Define if using libsodium])
-    PKG_CHECK_MODULES(OT_DEP_LIBSODIUM, libsodium >= $LIBSODIUM_DEPENDENCY, have_libsodium=yes,  have_libsodium=no)
-    AS_IF([ test x$have_libsodium = xno ], [
-       AC_MSG_ERROR([Need LIBSODIUM version $LIBSODIUM_DEPENDENCY or later])
+    PKG_CHECK_MODULES(OT_DEP_LIBSODIUM, libsodium >= $LIBSODIUM_DEPENDENCY, [
+      have_libsodium=yes
+      REQUIRES_PRIVATE="${REQUIRES_PRIVATE} libsodium >= ${LIBSODIUM_DEPENDENCY}"
+    ], [
+      have_libsodium=no
+      AC_MSG_ERROR([Need LIBSODIUM version $LIBSODIUM_DEPENDENCY or later])
     ])
 ], with_ed25519_libsodium=no )
 AM_CONDITIONAL(USE_LIBSODIUM, test "x$have_libsodium" = xyes)
@@ -391,6 +405,7 @@ AS_IF([ test x$with_libarchive != xno ], [
     AS_IF([ test x$have_libarchive = xyes], [
         AC_DEFINE([HAVE_LIBARCHIVE], 1, [Define if we have libarchive.pc])
 	PKG_CHECK_MODULES(OT_DEP_LIBARCHIVE, $LIBARCHIVE_DEPENDENCY)
+	REQUIRES_PRIVATE="${REQUIRES_PRIVATE} ${LIBARCHIVE_DEPENDENCY}"
         save_LIBS=$LIBS
         LIBS=$OT_DEP_LIBARCHIVE_LIBS
         AC_CHECK_FUNCS(archive_read_support_filter_all)
@@ -420,6 +435,7 @@ AS_IF([ test x$with_selinux != xno ], [
     AS_IF([ test x$have_selinux = xyes], [
         AC_DEFINE([HAVE_SELINUX], 1, [Define if we have libselinux.pc])
 	PKG_CHECK_MODULES(OT_DEP_SELINUX, $SELINUX_DEPENDENCY)
+	REQUIRES_PRIVATE="${REQUIRES_PRIVATE} ${SELINUX_DEPENDENCY}"
 	with_selinux=yes
     ], [
 	with_selinux=no
@@ -457,6 +473,7 @@ AC_ARG_WITH(openssl,
 AS_HELP_STRING([--with-openssl], [Enable use of OpenSSL libcrypto (checksums)]),with_openssl=$withval,with_openssl=no)
 AS_IF([ test x$with_openssl != xno ], [
       PKG_CHECK_MODULES(OT_DEP_CRYPTO, $OPENSSL_DEPENDENCY)
+      REQUIRES_PRIVATE="${REQUIRES_PRIVATE} ${OPENSSL_DEPENDENCY}"
       AC_DEFINE([HAVE_OPENSSL], 1, [Define if we have openssl])
       with_crypto=openssl
       with_openssl=yes
@@ -477,6 +494,7 @@ dnl supports --with-crypto=gnutls
 GNUTLS_DEPENDENCY="gnutls >= 3.5.0"
 AS_IF([ test $with_crypto = gnutls ], [
       PKG_CHECK_MODULES(OT_DEP_CRYPTO, $GNUTLS_DEPENDENCY)
+      REQUIRES_PRIVATE="${REQUIRES_PRIVATE} ${GNUTLS_DEPENDENCY}"
       AC_DEFINE([HAVE_GNUTLS], 1, [Define if we have gnutls])
       OSTREE_FEATURES="$OSTREE_FEATURES gnutls"
 ])
@@ -504,6 +522,7 @@ AS_IF([ test x$with_avahi != xno ], [
     AS_IF([ test x$have_avahi = xyes], [
         AC_DEFINE([HAVE_AVAHI], 1, [Define if we have avahi-client.pc and avahi-glib.pc])
         PKG_CHECK_MODULES(OT_DEP_AVAHI, $AVAHI_DEPENDENCY)
+	REQUIRES_PRIVATE="${REQUIRES_PRIVATE} ${AVAHI_DEPENDENCY}"
         with_avahi=yes
     ], [
         with_avahi=no
@@ -599,6 +618,7 @@ AS_IF([ test x$with_libsystemd != xno ], [
     AS_IF([ test x$have_libsystemd = xyes], [
         AC_DEFINE([HAVE_LIBSYSTEMD], 1, [Define if we have libsystemd.pc])
         PKG_CHECK_MODULES([LIBSYSTEMD], [libsystemd])
+	REQUIRES_PRIVATE="${REQUIRES_PRIVATE} libsystemd"
         with_libsystemd=yes
     ], [
         with_libsystemd=no
@@ -704,6 +724,8 @@ echo "
     introspection:                                $found_introspection
     rofiles-fuse:                                 $enable_rofiles_fuse
     HTTP backend:                                 $fetcher_backend
+    libsoup:                                      $with_soup
+    libsoup3:                                     $with_soup3
     SELinux:                                      $with_selinux
     fs-verity:                                    $ac_cv_header_linux_fsverity_h
     cryptographic checksums:                      $with_crypto
@@ -722,7 +744,7 @@ echo "
     dracut:                                       $with_dracut
     mkinitcpio:                                   $with_mkinitcpio
     Static compiler for ostree-prepare-root:      $with_static_compiler
-    Composefs:                                    $with_composefs"
+    Composefs:                                    $have_composefs"
 AS_IF([test x$with_builtin_grub2_mkconfig = xyes], [
     echo "    builtin grub2-mkconfig (instead of system):   $with_builtin_grub2_mkconfig"
 ], [

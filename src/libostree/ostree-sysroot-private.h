@@ -45,7 +45,7 @@ typedef enum
   OSTREE_SYSROOT_GLOBAL_OPT_SKIP_SYNC = 1 << 0,
   /* See https://github.com/ostreedev/ostree/pull/2847 */
   OSTREE_SYSROOT_GLOBAL_OPT_NO_EARLY_PRUNE = 1 << 1,
-  OSTREE_SYSROOT_GLOBAL_OPT_BOOTLOADER_NAMING_2 = 1 << 2,
+  OSTREE_SYSROOT_GLOBAL_OPT_BOOTLOADER_NAMING_1 = 1 << 2,
 } OstreeSysrootGlobalOptFlags;
 
 typedef enum
@@ -74,8 +74,9 @@ struct OstreeSysroot
   /* The device/inode for / and /etc, used to detect booted deployment */
   dev_t root_device;
   ino_t root_inode;
-  dev_t etc_device;
-  ino_t etc_inode;
+
+  // The parsed data from /run/ostree
+  GVariantDict *run_ostree_metadata;
 
   gboolean is_physical; /* TRUE if we're pointed at physical storage root and not a deployment */
   GPtrArray *deployments;
@@ -84,6 +85,8 @@ struct OstreeSysroot
   OstreeDeployment *booted_deployment;
   OstreeDeployment *staged_deployment;
   GVariant *staged_deployment_data;
+  // True if loaded_ts is initialized
+  gboolean has_loaded;
   struct timespec loaded_ts;
 
   /* Only access through ostree_sysroot_[_get]repo() */
@@ -92,6 +95,9 @@ struct OstreeSysroot
   OstreeSysrootGlobalOptFlags opt_flags;
   OstreeSysrootDebugFlags debug_flags;
 };
+
+/* Key in staged deployment variant for finalization locking */
+#define _OSTREE_SYSROOT_STAGED_KEY_LOCKED "locked"
 
 #define OSTREE_SYSROOT_LOCKFILE "ostree/lock"
 /* We keep some transient state in /run */
@@ -139,13 +145,18 @@ gboolean _ostree_sysroot_boot_complete (OstreeSysroot *self, GCancellable *cance
 
 OstreeDeployment *_ostree_sysroot_deserialize_deployment_from_variant (GVariant *v, GError **error);
 
-char *_ostree_sysroot_get_origin_relpath (GFile *path, guint32 *out_device, guint64 *out_inode,
-                                          GCancellable *cancellable, GError **error);
+char *_ostree_sysroot_get_deployment_backing_relpath (OstreeDeployment *deployment);
 
 gboolean _ostree_sysroot_rmrf_deployment (OstreeSysroot *sysroot, OstreeDeployment *deployment,
                                           GCancellable *cancellable, GError **error);
 
+gboolean _ostree_sysroot_stateroot_legacy_var_init (int dfd, GError **error);
+
 char *_ostree_sysroot_get_runstate_path (OstreeDeployment *deployment, const char *key);
+
+gboolean _ostree_sysroot_run_in_deployment (int deployment_dfd, const char *const *bwrap_argv,
+                                            const gchar *const *child_argv, gint *exit_status,
+                                            gchar **stdout, GError **error);
 
 char *_ostree_sysroot_join_lines (GPtrArray *lines);
 

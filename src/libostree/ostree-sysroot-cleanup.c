@@ -19,8 +19,10 @@
 
 #include "config.h"
 
+#include "ostree-core-private.h"
 #include "ostree-linuxfsutil.h"
 #include "ostree-repo-private.h"
+#include "otcore.h"
 #include "otutil.h"
 
 #include "ostree-sysroot-private.h"
@@ -216,6 +218,7 @@ gboolean
 _ostree_sysroot_rmrf_deployment (OstreeSysroot *self, OstreeDeployment *deployment,
                                  GCancellable *cancellable, GError **error)
 {
+  g_autofree char *backing_relpath = _ostree_sysroot_get_deployment_backing_relpath (deployment);
   g_autofree char *origin_relpath = ostree_deployment_get_origin_relpath (deployment);
   g_autofree char *deployment_path = ostree_sysroot_get_deployment_dirpath (self, deployment);
   struct stat stbuf;
@@ -235,6 +238,12 @@ _ostree_sysroot_rmrf_deployment (OstreeSysroot *self, OstreeDeployment *deployme
 
   /* This deployment wasn't referenced, so delete it */
   if (!_ostree_linuxfs_fd_alter_immutable_flag (deployment_fd, FALSE, cancellable, error))
+    return FALSE;
+  /* Note we must delete the origin and backing directories first, as the "source of truth"
+   * is the deployment path.  We don't currently have code that detects "orphaned"
+   * origin files or work directories.
+   */
+  if (!glnx_shutil_rm_rf_at (self->sysroot_fd, backing_relpath, cancellable, error))
     return FALSE;
   if (!glnx_shutil_rm_rf_at (self->sysroot_fd, origin_relpath, cancellable, error))
     return FALSE;
@@ -563,12 +572,76 @@ _ostree_sysroot_cleanup_internal (OstreeSysroot *self, gboolean do_prune_repo,
                                               &freed_space, cancellable, error))
         return FALSE;
 
-      /* TODO remove printf in library */
       if (freed_space > 0)
         {
           g_autofree char *freed_space_str = g_format_size_full (freed_space, 0);
-          g_print ("Freed objects: %s\n", freed_space_str);
+          ot_journal_print (LOG_INFO, "Freed objects: %s", freed_space_str);
         }
+    }
+
+  return TRUE;
+}
+
+/**
+ * ostree_sysroot_update_post_copy:
+ * @self: Sysroot
+ * @error: Error
+ *
+ * Update a sysroot as needed after having copied it into place using file-level
+ * operations. This enables options like fs-verity on the required files that may
+ * have been lost during the copy.
+ *
+ * Since: 2023.11
+ */
+gboolean
+ostree_sysroot_update_post_copy (OstreeSysroot *self, GCancellable *cancellable, GError **error)
+{
+  OstreeRepo *repo = ostree_sysroot_repo (self);
+
+  if (repo->fs_verity_wanted == _OSTREE_FEATURE_NO)
+    return TRUE;
+
+  g_autoptr (GHashTable) objects
+      = ostree_repo_list_objects_set (repo, OSTREE_REPO_LIST_OBJECTS_LOOSE, cancellable, error);
+  if (objects == NULL)
+    return FALSE;
+
+  GLNX_HASH_TABLE_FOREACH (objects, GVariant *, key)
+    {
+      const char *checksum;
+      OstreeObjectType objtype;
+
+      ostree_object_name_deserialize (key, &checksum, &objtype);
+
+      char loose_path_buf[_OSTREE_LOOSE_PATH_MAX];
+      _ostree_loose_path (loose_path_buf, checksum, objtype, repo->mode);
+
+      gboolean supported;
+      if (!_ostree_ensure_fsverity (repo, FALSE, repo->objects_dir_fd, loose_path_buf, &supported,
+                                    error))
+        return FALSE;
+
+      if (!supported)
+        break; /* If not supported, skip rest */
+    }
+
+  g_autoptr (GPtrArray) all_deployment_dirs = NULL;
+  if (!list_all_deployment_directories (self, &all_deployment_dirs, cancellable, error))
+    return FALSE;
+  g_assert (all_deployment_dirs); /* Pacify static analysis */
+  for (guint i = 0; i < all_deployment_dirs->len; i++)
+    {
+      OstreeDeployment *deployment = all_deployment_dirs->pdata[i];
+      g_autofree char *deployment_path = ostree_sysroot_get_deployment_dirpath (self, deployment);
+
+      g_autofree char *cfs_file = g_build_filename (deployment_path, OSTREE_COMPOSEFS_NAME, NULL);
+
+      gboolean supported;
+      if (!_ostree_ensure_fsverity (repo, TRUE, self->sysroot_fd, cfs_file, &supported, error))
+        return FALSE;
+
+      if (!supported)
+        break; /* If not supported, skip rest */
     }
 
   return TRUE;

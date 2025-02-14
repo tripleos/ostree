@@ -28,6 +28,7 @@
 #include <gio/gunixoutputstream.h>
 #include <glib-unix.h>
 #include <glib/gprintf.h>
+#include <stdbool.h>
 #include <sys/ioctl.h>
 #include <sys/statvfs.h>
 #include <sys/xattr.h>
@@ -138,6 +139,8 @@ gboolean
 _ostree_write_bareuser_metadata (int fd, guint32 uid, guint32 gid, guint32 mode, GVariant *xattrs,
                                  GError **error)
 {
+  if (xattrs != NULL && !_ostree_validate_structureof_xattrs (xattrs, error))
+    return FALSE;
   g_autoptr (GVariant) filemeta = create_file_metadata (uid, gid, mode, xattrs);
 
   if (TEMP_FAILURE_RETRY (fsetxattr (fd, "user.ostreemeta", (char *)g_variant_get_data (filemeta),
@@ -585,11 +588,11 @@ _ostree_repo_bare_content_cleanup (OstreeRepoBareContent *regwrite)
 }
 
 /* Allocate an O_TMPFILE, write everything from @input to it, but
- * not exceeding @length.  Used for every object in archive repos,
- * and content objects in all bare-type repos.
+ * not exceeding @length.
  */
 static gboolean
-create_regular_tmpfile_linkable_with_content (OstreeRepo *self, guint64 length, GInputStream *input,
+create_regular_tmpfile_linkable_with_content (OstreeRepo *self, guint64 length,
+                                              GInputStream *original_input, GInputStream *input,
                                               GLnxTmpfile *out_tmpf, GCancellable *cancellable,
                                               GError **error)
 {
@@ -600,40 +603,44 @@ create_regular_tmpfile_linkable_with_content (OstreeRepo *self, guint64 length, 
                                       error))
     return FALSE;
 
-  if (!glnx_try_fallocate (tmpf.fd, 0, length, error))
-    return FALSE;
-
-  if (G_IS_FILE_DESCRIPTOR_BASED (input))
+  // Try to do a reflink if possible; if we hit this case we're operating on trusted local input.
+  gboolean did_clone = FALSE;
+  if (G_IS_FILE_DESCRIPTOR_BASED (original_input))
     {
-      int infd = g_file_descriptor_based_get_fd ((GFileDescriptorBased *)input);
-      if (glnx_regfile_copy_bytes (infd, tmpf.fd, (off_t)length) < 0)
-        return glnx_throw_errno_prefix (error, "regfile copy");
+      int infd = g_file_descriptor_based_get_fd ((GFileDescriptorBased *)original_input);
+      if (ioctl (tmpf.fd, FICLONE, infd) == 0)
+        {
+          did_clone = TRUE;
+        }
     }
   else
     {
-      /* We used to do a g_output_stream_splice(), but there are two issues with that:
-       *  - We want to honor the size provided, to avoid malicious content that says it's
-       *    e.g. 10 bytes but is actually gigabytes.
-       *  - Due to GLib bugs that pointlessly calls `poll()` on the output fd for every write
-       */
-      gsize buf_size = MIN (length, 1048576);
-      g_autofree gchar *buf = g_malloc (buf_size);
-      guint64 remaining = length;
-      while (remaining > 0)
-        {
-          const gssize bytes_read
-              = g_input_stream_read (input, buf, MIN (remaining, buf_size), cancellable, error);
-          if (bytes_read < 0)
-            return FALSE;
-          else if (bytes_read == 0)
-            return glnx_throw (error,
-                               "Unexpected EOF with %" G_GUINT64_FORMAT "/%" G_GUINT64_FORMAT
-                               " bytes remaining",
-                               remaining, length);
-          if (glnx_loop_write (tmpf.fd, buf, bytes_read) < 0)
-            return glnx_throw_errno_prefix (error, "write");
-          remaining -= bytes_read;
-        }
+      if (!glnx_try_fallocate (tmpf.fd, 0, length, error))
+        return FALSE;
+    }
+
+  /* We used to do a g_output_stream_splice(), but there are two issues with that:
+   *  - We want to honor the size provided, to avoid malicious content that says it's
+   *    e.g. 10 bytes but is actually gigabytes.
+   *  - Due to GLib bugs that pointlessly calls `poll()` on the output fd for every write
+   */
+  gsize buf_size = MIN (length, 1048576);
+  g_autofree gchar *buf = g_malloc (buf_size);
+  guint64 remaining = length;
+  while (remaining > 0)
+    {
+      const gssize bytes_read
+          = g_input_stream_read (input, buf, MIN (remaining, buf_size), cancellable, error);
+      if (bytes_read < 0)
+        return FALSE;
+      else if (bytes_read == 0)
+        return glnx_throw (error,
+                           "Unexpected EOF with %" G_GUINT64_FORMAT "/%" G_GUINT64_FORMAT
+                           " bytes remaining",
+                           remaining, length);
+      if (!did_clone && glnx_loop_write (tmpf.fd, buf, bytes_read) < 0)
+        return glnx_throw_errno_prefix (error, "write");
+      remaining -= bytes_read;
     }
 
   if (!glnx_fchmod (tmpf.fd, 0644, error))
@@ -787,7 +794,7 @@ _try_clone_from_payload_link (OstreeRepo *self, OstreeRepo *dest_repo, const cha
       glnx_autofd int fdf = -1;
       char loose_path_buf[_OSTREE_LOOSE_PATH_MAX];
       char loose_path_target_buf[_OSTREE_LOOSE_PATH_MAX];
-      char target_buf[_OSTREE_LOOSE_PATH_MAX + _OSTREE_PAYLOAD_LINK_PREFIX_LEN];
+      char target_buf[_OSTREE_LOOSE_PATH_MAX + _OSTREE_PAYLOAD_LINK_PREFIX_LEN + 1];
       char target_checksum[OSTREE_SHA256_STRING_LEN + 1];
       int dfd = dfd_searches[i];
       ssize_t size;
@@ -797,19 +804,25 @@ _try_clone_from_payload_link (OstreeRepo *self, OstreeRepo *dest_repo, const cha
       _ostree_loose_path (loose_path_buf, payload_checksum, OSTREE_OBJECT_TYPE_PAYLOAD_LINK,
                           self->mode);
 
-      size = TEMP_FAILURE_RETRY (readlinkat (dfd, loose_path_buf, target_buf, sizeof (target_buf)));
+      size = TEMP_FAILURE_RETRY (
+          readlinkat (dfd, loose_path_buf, target_buf, sizeof (target_buf) - 1));
       if (size < 0)
         {
           if (errno == ENOENT)
             continue;
           return glnx_throw_errno_prefix (error, "readlinkat");
         }
+      target_buf[size] = '\0';
 
+      const size_t expected_len = OSTREE_SHA256_STRING_LEN + _OSTREE_PAYLOAD_LINK_PREFIX_LEN;
       if (size < OSTREE_SHA256_STRING_LEN + _OSTREE_PAYLOAD_LINK_PREFIX_LEN)
-        return glnx_throw (error, "invalid data size for %s", loose_path_buf);
+        return glnx_throw (error, "invalid data size for %s; expected=%llu found=%llu",
+                           loose_path_buf, (unsigned long long)expected_len,
+                           (unsigned long long)size);
 
-      sprintf (target_checksum, "%.2s%.62s", target_buf + _OSTREE_PAYLOAD_LINK_PREFIX_LEN,
-               target_buf + _OSTREE_PAYLOAD_LINK_PREFIX_LEN + 3);
+      snprintf (target_checksum, sizeof (target_checksum), "%.2s%.62s",
+                target_buf + _OSTREE_PAYLOAD_LINK_PREFIX_LEN,
+                target_buf + _OSTREE_PAYLOAD_LINK_PREFIX_LEN + 3);
 
       _ostree_loose_path (loose_path_target_buf, target_checksum, OSTREE_OBJECT_TYPE_FILE,
                           self->mode);
@@ -988,8 +1001,8 @@ write_content_object (OstreeRepo *self, const char *expected_checksum, GInputStr
     }
   else if (repo_mode != OSTREE_REPO_MODE_ARCHIVE)
     {
-      if (!create_regular_tmpfile_linkable_with_content (self, size, file_input, &tmpf, cancellable,
-                                                         error))
+      if (!create_regular_tmpfile_linkable_with_content (self, size, input, file_input, &tmpf,
+                                                         cancellable, error))
         return FALSE;
     }
   else
@@ -1645,7 +1658,7 @@ ostree_repo_prepare_transaction (OstreeRepo *self, gboolean *out_transaction_res
   self->reserved_blocks = reserved_bytes / self->txn.blocksize;
 
   /* Use the appropriate free block count if we're unprivileged */
-  guint64 bfree = (getuid () != 0 ? stvfsbuf.f_bavail : stvfsbuf.f_bfree);
+  guint64 bfree = (ot_util_process_privileged () ? stvfsbuf.f_bfree : stvfsbuf.f_bavail);
   if (bfree > self->reserved_blocks)
     self->txn.max_blocks = bfree - self->reserved_blocks;
   else
@@ -3160,7 +3173,8 @@ _ostree_repo_commit_modifier_apply (OstreeRepo *self, OstreeRepoCommitModifier *
   if (canonicalize_perms)
     {
       guint mode = g_file_info_get_attribute_uint32 (modified_info, "unix::mode");
-      switch (g_file_info_get_file_type (file_info))
+      GFileType ty = g_file_info_get_file_type (file_info);
+      switch (ty)
         {
         case G_FILE_TYPE_REGULAR:
           /* In particular, we want to squash the s{ug}id bits, but this also
@@ -3175,7 +3189,7 @@ _ostree_repo_commit_modifier_apply (OstreeRepo *self, OstreeRepoCommitModifier *
         case G_FILE_TYPE_SYMBOLIC_LINK:
           break;
         default:
-          g_assert_not_reached ();
+          g_error ("unexpected file type %u", (unsigned)ty);
         }
       g_file_info_set_attribute_uint32 (modified_info, "unix::uid", 0);
       g_file_info_set_attribute_uint32 (modified_info, "unix::gid", 0);
@@ -3272,8 +3286,14 @@ get_final_xattrs (OstreeRepo *self, OstreeRepoCommitModifier *modifier, const ch
   if (modifier && modifier->sepolicy)
     {
       g_autofree char *label = NULL;
+      const char *path_for_labeling = relpath;
 
-      if (!ostree_sepolicy_get_label (modifier->sepolicy, relpath,
+      bool using_v1 = (modifier->flags & OSTREE_REPO_COMMIT_MODIFIER_FLAGS_SELINUX_LABEL_V1) > 0;
+      bool is_usretc = g_str_equal (relpath, "/usr/etc") || g_str_has_prefix (relpath, "/usr/etc/");
+      if (using_v1 && is_usretc)
+        path_for_labeling += strlen ("/usr");
+
+      if (!ostree_sepolicy_get_label (modifier->sepolicy, path_for_labeling,
                                       g_file_info_get_attribute_uint32 (file_info, "unix::mode"),
                                       &label, cancellable, error))
         return FALSE;

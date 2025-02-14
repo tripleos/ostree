@@ -1,5 +1,5 @@
 ---
-nav_order: 3
+nav_order: 30
 ---
 
 # Anatomy of an OSTree repository
@@ -7,6 +7,8 @@ nav_order: 3
 
 1. TOC
 {:toc}
+
+<!-- SPDX-License-Identifier: (CC-BY-SA-3.0 OR GFDL-1.3-or-later) -->
 
 ## Core object types and data model
 
@@ -183,6 +185,3 @@ the only way to provide GPG signatures (transitively) on deltas.
 If a repository administrator creates a summary file, they must
 thereafter run `ostree summary -u` to update it whenever a ref is
 updated or a static delta is generated.
-
-###### Licensing for this document:
-`SPDX-License-Identifier: (CC-BY-SA-3.0 OR GFDL-1.3-or-later)`

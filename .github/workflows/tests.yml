@@ -14,7 +14,7 @@ jobs:
   codestyle:
     name: "Code style"
     runs-on: ubuntu-latest
-    container: registry.ci.openshift.org/coreos/fcos-buildroot:testing-devel
+    container: quay.io/coreos-assembler/fcos-buildroot:testing-devel
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
@@ -26,6 +26,21 @@ jobs:
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Test style
         run: ./ci/ci-commitmessage-submodules.sh
+  clang-format:
+    name: "clang-format"
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
+      # https://github.com/actions/checkout/issues/760
+      - name: Mark git checkout as safe
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - run: sudo apt install clang-format
+      - name: Test style
+        run: ./ci/clang-format.sh
   build-integration:
     runs-on: ubuntu-latest
     container: quay.io/coreos-assembler/fcos-buildroot:testing-devel
@@ -38,14 +53,14 @@ jobs:
       - name: Build
         run: cd tests/inst && cargo build --verbose --release
       - name: Upload binary
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: ostree-test
           path: tests/inst/target/release/ostree-test
   minimal:
     name: "Build - FCOS minimal"
     runs-on: ubuntu-latest
-    container: registry.ci.openshift.org/coreos/fcos-buildroot:testing-devel
+    container: quay.io/coreos-assembler/fcos-buildroot:testing-devel
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
@@ -63,7 +78,7 @@ jobs:
   build-c:
     name: "Build (Fedora)"
     runs-on: ubuntu-latest
-    container: registry.ci.openshift.org/coreos/fcos-buildroot:testing-devel
+    container: quay.io/coreos-assembler/fcos-buildroot:testing-devel
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -76,33 +91,9 @@ jobs:
           ./configure --with-curl --with-selinux --with-dracut=yesbutnoconf --with-composefs &&
           make -j 4 && make install DESTDIR=$(pwd)/install && tar -c -C install --zstd -f inst.tar.zst .
       - name: Upload binary
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: inst.tar.zst
-          path: inst.tar.zst
-  build-c9s:
-    name: "Build (C9S)"
-    runs-on: ubuntu-latest
-    container: quay.io/centos/centos:stream9
-    steps:
-      - name: Install bootstrap dependencies
-        run: dnf -y install git-core dnf-utils zstd
-      - name: Checkout repository
-        uses: actions/checkout@v3
-      # https://github.com/actions/checkout/issues/760
-      - name: Mark git checkout as safe
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - name: Install build dependencies
-        run:  dnf config-manager --enable crb && dnf builddep -y ostree
-      - name: Build
-        run: |
-          env NOCONFIGURE=1 ./autogen.sh &&
-          ./configure --with-curl --with-selinux --with-dracut=yesbutnoconf &&
-          make -j 4 && make install DESTDIR=$(pwd)/install && tar -c -C install --zstd -f inst.tar.zst .
-      - name: Upload binary
-        uses: actions/upload-artifact@v2
-        with:
-          name: inst-c9s.tar.zst
           path: inst.tar.zst
   privtest:
     name: "Privileged testing"
@@ -115,13 +106,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
       - name: Download install tree
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
           name: inst.tar.zst
       - name: Install
         run: tar -C / -xvf inst.tar.zst && rm -f inst.tar.zst
       - name: Download test binary
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
           name: ostree-test
       - name: Install

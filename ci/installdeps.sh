@@ -17,9 +17,11 @@ dn=$(dirname $0)
 pkg_upgrade
 pkg_install_buildroot
 pkg_builddep ostree
+# Not yet in the spec
+pkg_install composefs-devel
 pkg_install sudo which attr fuse strace \
     libubsan libasan libtsan redhat-rpm-config \
-    elfutils
+    elfutils fsverity-utils
 if test -n "${CI_PKGS:-}"; then
     pkg_install ${CI_PKGS}
 fi

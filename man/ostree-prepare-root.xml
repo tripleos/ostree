@@ -85,10 +85,10 @@ License along with this library. If not, see <https://www.gnu.org/licenses/>.
         </para>
 
         <para>
-            A read-only bind mount is created over <literal>/sysroot/usr</literal>.  The immutable bit is set on the deployment
+            A read-only bind mount is created over <literal>/sysroot/usr</literal>.  The immutable bit (see chattr(1)) is set on the deployment
             root, so this provides basic protection for filesystem mutation.  If the <literal>sysroot.readonly</literal>
-            option is enabled, instead a writable bind mount for <literal>/sysroot/etc</literal>, and everything else
-            is mounted read-only.
+            option is enabled, then <literal>/sysroot/sysroot</literal> is mounted read-only to provide further protection and a writable bind mount for
+            <literal>/sysroot/etc</literal> is created.
         </para>
 
         <para>
@@ -111,15 +111,52 @@ License along with this library. If not, see <https://www.gnu.org/licenses/>.
         <variablelist>
             <varlistentry>
                 <term><varname>sysroot.readonly</varname></term>
-                <listitem><para>A boolean value; the default is <literal>false</literal>.  If this is set to <literal>true</literal>, then the <literal>/sysroot</literal> mount point is mounted read-only.</para></listitem>
+                <listitem><para>A boolean value; the default is <literal>false</literal> unless composefs is enabled.  If this is set to <literal>true</literal>, then the <literal>/sysroot</literal> mount point is mounted read-only.</para></listitem>
+            </varlistentry>
+            <varlistentry>
+                <term><varname>etc.transient</varname></term>
+                <listitem><para>A boolean value; the default is <literal>false</literal>.  If this is set to <literal>true</literal>, then the <literal>/etc</literal> mount point is mounted transiently i.e. a non-persistent location.</para></listitem>
+            </varlistentry>
+            <varlistentry>
+                <term><varname>root.transient</varname></term>
+                <listitem><para>A boolean value; the default is <literal>false</literal>.
+                   Setting this flag to <literal>true</literal> requires composefs (See <literal>composefs.enabled</literal>).
+                   When enabled, the root mount point <literal>/</literal> will be an overlayfs whose contents will be stored
+                   in a tmpfs, and hence discarded on OS upgrade or reboot.
+                </para>
+                <para>
+                   This option is independent of <literal>etc.transient</literal> and <literal>sysroot.readonly</literal>;
+                   it is supported for example to have <literal>root.transient=true</literal> but <literal>etc.transient=false</literal> in which case changes to <literal>/etc</literal> continue
+                   to persist across updates, with the default OSTree 3-way merge applied.
+                   Also related to persistence it is important to emphasize that <literal>/sysroot</literal> (the physical root filesystem) is still persistent
+                   by default; in-place OS upgrades can be applied.
+                </para>
+                <para>
+                  Enabling this option can make it significantly easier to adopt an image-based model in some circumstances.
+                  For example, if you have a configuration management system that is inspecting machine-specific state and
+                  e.g. dynamically installing packages or applying configuration, it can more easily be adapted to
+                  run on each boot, while still shifting a portion (or ideally most) image configuration to build time
+                  as part of the base image/commit.
+                </para>
+                </listitem>
             </varlistentry>
             <varlistentry>
                 <term><varname>composefs.enabled</varname></term>
-                <listitem><para>This can be <literal>yes</literal>, <literal>no</literal>. <literal>maybe</literal> or
-                <literal>signed</literal>. The default is <literal>maybe</literal>.  If set to <literal>yes</literal> or
-                <literal>signed</literal>, then composefs is always used, and the boot fails if it is not
-                available. Additionally if set to <literal>signed</literal>, boot will fail if the image cannot be
-                validated by a public key. If set to <literal>maybe</literal>, then composefs is used if supported.
+                <listitem><para>This can be <literal>yes</literal>, <literal>no</literal>, <literal>maybe</literal>,
+                <literal>signed</literal>, or <literal>verity</literal>. The default is <literal>no</literal>.
+                If set to <literal>yes</literal>, <literal>signed</literal>, or <literal>verity</literal>,
+                then composefs is always used, and the boot fails if it is not available.
+                If set to <literal>signed</literal> or <literal>verity</literal>,
+                before the content of a file is read,
+                the integrity of its backing OSTree object is validated by the digest stored in the image.
+                Additionally, if set to <literal>signed</literal>, boot will fail if the image cannot be
+                validated by a public key.
+                Setting this to <literal>maybe</literal> will cause composefs to be used at runtime only
+                if the deployment has a composefs generated, which causes unpredicable and confusing semantics
+                and is not recommended. In practice with the <emphasis>current</emphasis> version of ostree,
+                in the case where composefs is enabled at build time for both the version that made the
+                deployment (often an older OS version), this will be equivalent to <literal>yes</literal>.
+                But in general one either wants composefs or not, so choose an explicit value for that.
                 </para></listitem>
             </varlistentry>
             <varlistentry>
@@ -131,6 +168,18 @@ License along with this library. If not, see <https://www.gnu.org/licenses/>.
                 commit must match the target composefs image.</para></listitem>
             </varlistentry>
         </variablelist>
+
+        <para>
+            The following kernel commandline parameters are also parsed:
+        </para>
+        <variablelist>
+            <varlistentry>
+                <term><varname>ostree.prepare-root.composefs</varname></term>
+                <listitem><para>This accepts the same values as <literal>composefs.enabled</literal> above, and overrides the config file (if present).
+                    For example, specifying <literal>ostree.prepare-root.composefs=0</literal> will disable composefs, even if it is enabled by default in the initrd config.</para></listitem>
+            </varlistentry>
+        </variablelist>
+
     </refsect1>
 
 

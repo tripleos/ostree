@@ -36,7 +36,7 @@
 #include "ostree-repo-private.h"
 #include "ostree-sepolicy-private.h"
 #include "ostree-sysroot-private.h"
-#include "ostree.h"
+#include "otcore.h"
 
 /**
  * SECTION:ostree-sysroot
@@ -83,6 +83,7 @@ ostree_sysroot_finalize (GObject *object)
 
   g_clear_object (&self->path);
   g_clear_object (&self->repo);
+  g_clear_pointer (&self->run_ostree_metadata, g_variant_dict_unref);
   g_clear_pointer (&self->deployments, g_ptr_array_unref);
   g_clear_object (&self->booted_deployment);
   g_clear_object (&self->staged_deployment);
@@ -180,7 +181,7 @@ ostree_sysroot_init (OstreeSysroot *self)
   const GDebugKey globalopt_keys[] = {
     { "skip-sync", OSTREE_SYSROOT_GLOBAL_OPT_SKIP_SYNC },
     { "no-early-prune", OSTREE_SYSROOT_GLOBAL_OPT_NO_EARLY_PRUNE },
-    { "bootloader-naming-2", OSTREE_SYSROOT_GLOBAL_OPT_BOOTLOADER_NAMING_2 },
+    { "bootloader-naming-1", OSTREE_SYSROOT_GLOBAL_OPT_BOOTLOADER_NAMING_1 },
   };
   const GDebugKey keys[] = {
     { "mutable-deployments", OSTREE_SYSROOT_DEBUG_MUTABLE_DEPLOYMENTS },
@@ -284,7 +285,7 @@ ostree_sysroot_initialize_with_mount_namespace (OstreeSysroot *self, GCancellabl
     return FALSE;
 
   /* Do nothing if we're not privileged */
-  if (getuid () != 0)
+  if (!ot_util_process_privileged ())
     return TRUE;
 
   /* We also assume operating on non-booted roots won't have a readonly sysroot */
@@ -774,6 +775,9 @@ parse_deployment (OstreeSysroot *self, const char *boot_link, OstreeDeployment *
   g_autofree char *osname = NULL;
   g_autofree char *bootcsum = NULL;
   int treebootserial = -1;
+
+  // Note is_boot should always be false here, this boot_link is taken from BLS file, not
+  // /proc/cmdline, BLS files are present in aboot images
   if (!_ostree_sysroot_parse_bootlink (boot_link, &entry_boot_version, &osname, &bootcsum,
                                        &treebootserial, error))
     return FALSE;
@@ -808,26 +812,35 @@ parse_deployment (OstreeSysroot *self, const char *boot_link, OstreeDeployment *
   if (looking_for_booted_deployment)
     {
       struct stat stbuf;
-      struct stat etc_stbuf = {};
       if (!glnx_fstat (deployment_dfd, &stbuf, error))
         return FALSE;
 
-      /* We look for either the root or the etc subdir of the
-       * deployment. We need to do this, because when using composefs,
-       * the root is not a bind mount of the deploy dir, but the etc
-       * dir is.
+      /* ostree-prepare-root records the (device, inode) pair of the underlying real deployment
+       * directory (before we might have mounted a composefs or overlayfs on top).
+       *
+       * Because this parser is operating outside the mounted namespace, we compare against
+       * that backing directory.
        */
-
-      if (!glnx_fstatat_allow_noent (deployment_dfd, "etc", &etc_stbuf, 0, error))
-        return FALSE;
+      g_assert (self->run_ostree_metadata);
+      guint64 expected_root_dev = 0;
+      guint64 expected_root_inode = 0;
+      if (!g_variant_dict_lookup (self->run_ostree_metadata,
+                                  OTCORE_RUN_BOOTED_KEY_BACKING_ROOTDEVINO, "(tt)",
+                                  &expected_root_dev, &expected_root_inode))
+        {
+          g_debug ("Missing %s", OTCORE_RUN_BOOTED_KEY_BACKING_ROOTDEVINO);
+          expected_root_dev = (guint64)self->root_device;
+          expected_root_inode = (guint64)self->root_inode;
+        }
+      else
+        g_debug ("Target rootdev key %s found", OTCORE_RUN_BOOTED_KEY_BACKING_ROOTDEVINO);
 
       /* A bit ugly, we're assigning to a sysroot-owned variable from deep in
        * this parsing code. But eh, if something fails the sysroot state can't
        * be relied on anyways.
        */
       is_booted_deployment
-          = (stbuf.st_dev == self->root_device && stbuf.st_ino == self->root_inode)
-            || (etc_stbuf.st_dev == self->etc_device && etc_stbuf.st_ino == self->etc_inode);
+          = stbuf.st_dev == expected_root_dev && stbuf.st_ino == expected_root_inode;
     }
 
   g_autoptr (OstreeDeployment) ret_deployment
@@ -1016,27 +1029,27 @@ ostree_sysroot_initialize (OstreeSysroot *self, GError **error)
        * we'll use it to sanity check that we found a booted deployment for example.
        * Second, we also find out whether sysroot == /.
        */
-      if (!glnx_fstatat_allow_noent (AT_FDCWD, OSTREE_PATH_BOOTED, NULL, 0, error))
+      glnx_autofd int booted_state_fd = -1;
+      if (!ot_openat_ignore_enoent (AT_FDCWD, OSTREE_PATH_BOOTED, &booted_state_fd, error))
         return FALSE;
-      const gboolean ostree_booted = (errno == 0);
+      const gboolean ostree_booted = booted_state_fd != -1;
 
+      if (booted_state_fd != -1)
+        {
+          g_autoptr (GVariant) ostree_run_metadata_v = NULL;
+          if (!ot_variant_read_fd (booted_state_fd, 0, G_VARIANT_TYPE_VARDICT, TRUE,
+                                   &ostree_run_metadata_v, error))
+            return glnx_prefix_error (error, "failed to read %s", OTCORE_RUN_BOOTED);
+          self->run_ostree_metadata = g_variant_dict_new (ostree_run_metadata_v);
+        }
+
+      // Gather the root device/inode
       {
         struct stat root_stbuf;
         if (!glnx_fstatat (AT_FDCWD, "/", &root_stbuf, 0, error))
           return FALSE;
         self->root_device = root_stbuf.st_dev;
         self->root_inode = root_stbuf.st_ino;
-      }
-
-      {
-        struct stat etc_stbuf;
-        if (!glnx_fstatat_allow_noent (AT_FDCWD, "/etc", &etc_stbuf, 0, error))
-          return FALSE;
-        if (errno != ENOENT)
-          {
-            self->etc_device = etc_stbuf.st_dev;
-            self->etc_inode = etc_stbuf.st_ino;
-          }
       }
 
       struct stat self_stbuf;
@@ -1047,6 +1060,7 @@ ostree_sysroot_initialize (OstreeSysroot *self, GError **error)
           = (self->root_device == self_stbuf.st_dev && self->root_inode == self_stbuf.st_ino);
 
       self->root_is_ostree_booted = (ostree_booted && root_is_sysroot);
+      g_debug ("root_is_ostree_booted: %d", self->root_is_ostree_booted);
       self->loadstate = OSTREE_SYSROOT_LOAD_STATE_INIT;
     }
 
@@ -1106,6 +1120,8 @@ _ostree_sysroot_reload_staged (OstreeSysroot *self, GError **error)
            * canonical "staged_deployment" reference.
            */
           self->staged_deployment->staged = TRUE;
+          (void)g_variant_dict_lookup (staged_deployment_dict, _OSTREE_SYSROOT_STAGED_KEY_LOCKED,
+                                       "b", &self->staged_deployment->finalization_locked);
         }
     }
 
@@ -1245,7 +1261,7 @@ ostree_sysroot_load_if_changed (OstreeSysroot *self, gboolean *out_changed,
   if (!glnx_fstatat (self->sysroot_fd, "ostree/deploy", &stbuf, 0, error))
     return FALSE;
 
-  if (self->loaded_ts.tv_sec == stbuf.st_mtim.tv_sec
+  if (self->has_loaded && self->loaded_ts.tv_sec == stbuf.st_mtim.tv_sec
       && self->loaded_ts.tv_nsec == stbuf.st_mtim.tv_nsec)
     {
       if (out_changed)
@@ -1264,6 +1280,7 @@ ostree_sysroot_load_if_changed (OstreeSysroot *self, gboolean *out_changed,
     return FALSE;
 
   self->loaded_ts = stbuf.st_mtim;
+  self->has_loaded = TRUE;
 
   if (out_changed)
     *out_changed = TRUE;
@@ -1779,6 +1796,46 @@ ostree_sysroot_lock_finish (OstreeSysroot *self, GAsyncResult *result, GError **
   return g_task_propagate_boolean ((GTask *)result, error);
 }
 
+// This is a legacy subset of what happens normally via systemd tmpfiles.d;
+// it is only run in the case that the deployment it self comes without
+// usr/lib/tmpfiles.d
+gboolean
+_ostree_sysroot_stateroot_legacy_var_init (int dfd, GError **error)
+{
+  GLNX_AUTO_PREFIX_ERROR ("Legacy mode stateroot var initialization", error);
+
+  /* This is a bit of a legacy hack...but we have to keep it around
+   * now.  We're ensuring core subdirectories of /var exist.
+   */
+  if (!glnx_ensure_dir (dfd, "tmp", 0777, error))
+    return FALSE;
+
+  if (fchmodat (dfd, "tmp", 01777, 0) < 0)
+    return glnx_throw_errno_prefix (error, "fchmod %s", "var/tmp");
+
+  if (!glnx_ensure_dir (dfd, "lib", 0777, error))
+    return FALSE;
+
+  /* This needs to be available and properly labeled early during the boot
+   * process (before tmpfiles.d kicks in), so that journald can flush logs from
+   * the first boot there. https://bugzilla.redhat.com/show_bug.cgi?id=1265295
+   * */
+  if (!glnx_ensure_dir (dfd, "log", 0755, error))
+    return FALSE;
+
+  if (!glnx_fstatat_allow_noent (dfd, "run", NULL, AT_SYMLINK_NOFOLLOW, error))
+    return FALSE;
+  if (errno == ENOENT && symlinkat ("../run", dfd, "run") < 0)
+    return glnx_throw_errno_prefix (error, "Symlinking %s", "var/run");
+
+  if (!glnx_fstatat_allow_noent (dfd, "lock", NULL, AT_SYMLINK_NOFOLLOW, error))
+    return FALSE;
+  if (errno == ENOENT && symlinkat ("../run/lock", dfd, "lock") < 0)
+    return glnx_throw_errno_prefix (error, "Symlinking %s", "var/lock");
+
+  return TRUE;
+}
+
 /**
  * ostree_sysroot_init_osname:
  * @self: Sysroot
@@ -1809,31 +1866,6 @@ ostree_sysroot_init_osname (OstreeSysroot *self, const char *osname, GCancellabl
 
   if (mkdirat (dfd, "var", 0777) < 0)
     return glnx_throw_errno_prefix (error, "Creating %s", "var");
-
-  /* This is a bit of a legacy hack...but we have to keep it around
-   * now.  We're ensuring core subdirectories of /var exist.
-   */
-  if (mkdirat (dfd, "var/tmp", 0777) < 0)
-    return glnx_throw_errno_prefix (error, "Creating %s", "var/tmp");
-
-  if (fchmodat (dfd, "var/tmp", 01777, 0) < 0)
-    return glnx_throw_errno_prefix (error, "fchmod %s", "var/tmp");
-
-  if (mkdirat (dfd, "var/lib", 0777) < 0)
-    return glnx_throw_errno_prefix (error, "Creating %s", "var/lib");
-
-  /* This needs to be available and properly labeled early during the boot
-   * process (before tmpfiles.d kicks in), so that journald can flush logs from
-   * the first boot there. https://bugzilla.redhat.com/show_bug.cgi?id=1265295
-   * */
-  if (mkdirat (dfd, "var/log", 0755) < 0)
-    return glnx_throw_errno_prefix (error, "Creating %s", "var/log");
-
-  if (symlinkat ("../run", dfd, "var/run") < 0)
-    return glnx_throw_errno_prefix (error, "Symlinking %s", "var/run");
-
-  if (symlinkat ("../run/lock", dfd, "var/lock") < 0)
-    return glnx_throw_errno_prefix (error, "Symlinking %s", "var/lock");
 
   if (!_ostree_sysroot_bump_mtime (self, error))
     return FALSE;
@@ -1961,6 +1993,17 @@ ostree_sysroot_simple_write_deployment (OstreeSysroot *sysroot, const char *osna
     return FALSE;
 
   return TRUE;
+}
+
+/* Return the sysroot-relative path to the "backing" directory of a deployment
+ * which can hold additional data.
+ */
+char *
+_ostree_sysroot_get_deployment_backing_relpath (OstreeDeployment *deployment)
+{
+  return g_strdup_printf (
+      "ostree/deploy/%s/backing/%s.%d", ostree_deployment_get_osname (deployment),
+      ostree_deployment_get_csum (deployment), ostree_deployment_get_deployserial (deployment));
 }
 
 /* Deploy a copy of @target_deployment */
@@ -2197,10 +2240,11 @@ ostree_sysroot_deployment_unlock (OstreeSysroot *self, OstreeDeployment *deploym
         g_autofree char *devpath
             = unlocked_state == OSTREE_DEPLOYMENT_UNLOCKED_DEVELOPMENT
                   ? _ostree_sysroot_get_runstate_path (
-                      deployment, _OSTREE_SYSROOT_DEPLOYMENT_RUNSTATE_FLAG_DEVELOPMENT)
+                        deployment, _OSTREE_SYSROOT_DEPLOYMENT_RUNSTATE_FLAG_DEVELOPMENT)
                   : _ostree_sysroot_get_runstate_path (
-                      deployment, _OSTREE_SYSROOT_DEPLOYMENT_RUNSTATE_FLAG_TRANSIENT);
-        g_autofree char *devpath_parent = dirname (g_strdup (devpath));
+                        deployment, _OSTREE_SYSROOT_DEPLOYMENT_RUNSTATE_FLAG_TRANSIENT);
+        g_autofree char *devpath_parent_owned = g_strdup (devpath);
+        const char *devpath_parent = dirname (devpath_parent_owned);
 
         if (!glnx_shutil_mkdir_p_at (AT_FDCWD, devpath_parent, 0755, cancellable, error))
           return FALSE;

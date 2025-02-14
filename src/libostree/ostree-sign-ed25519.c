@@ -53,10 +53,6 @@ struct _OstreeSignEd25519
   GList *revoked_keys; /* malloc'd buffer of length OSTREE_SIGN_ED25519_PUBKEY_SIZE */
 };
 
-#ifdef G_DEFINE_AUTOPTR_CLEANUP_FUNC
-G_DEFINE_AUTOPTR_CLEANUP_FUNC (OstreeSignEd25519, g_object_unref)
-#endif
-
 static void ostree_sign_ed25519_iface_init (OstreeSignInterface *self);
 
 G_DEFINE_TYPE_WITH_CODE (OstreeSignEd25519, _ostree_sign_ed25519, G_TYPE_OBJECT,
@@ -107,7 +103,7 @@ validate_length (gsize found, gsize expected, GError **error)
     return TRUE;
   return glnx_throw (
       error, "Ill-formed input: expected %" G_GSIZE_FORMAT " bytes, got %" G_GSIZE_FORMAT " bytes",
-      found, expected);
+      expected, found);
 }
 
 static gboolean

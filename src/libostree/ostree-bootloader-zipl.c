@@ -22,9 +22,12 @@
 #include "ostree-libarchive-private.h"
 #include "ostree-sysroot-private.h"
 #include "otutil.h"
+#include <fcntl.h>
+#include <gio/gunixinputstream.h>
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #define SECURE_EXECUTION_SYSFS_FLAG "/sys/firmware/uv/prot_virt_guest"
 #define SECURE_EXECUTION_PARTITION "/dev/disk/by-label/se"
@@ -35,6 +38,7 @@
 #define SECURE_EXECUTION_LUKS_ROOT_KEY "/etc/luks/root"
 #define SECURE_EXECUTION_LUKS_BOOT_KEY "/etc/luks/boot"
 #define SECURE_EXECUTION_LUKS_CONFIG "/etc/crypttab"
+#define SECURE_BOOT_SYSFS_FLAG "/sys/firmware/ipl/secure"
 
 #if !(defined HAVE_LIBARCHIVE) && defined(__s390x__)
 #error libarchive is required for s390x
@@ -109,6 +113,52 @@ _ostree_bootloader_zipl_write_config (OstreeBootloader *bootloader, int bootvers
                                       error))
     return FALSE;
 
+  return TRUE;
+}
+
+static gboolean
+_ostree_secure_boot_is_enabled (gboolean *out_enabled, GCancellable *cancellable, GError **error)
+{
+  *out_enabled = FALSE;
+  glnx_autofd int fd = -1;
+  if (!ot_openat_ignore_enoent (AT_FDCWD, SECURE_BOOT_SYSFS_FLAG, &fd, error))
+    return FALSE;
+  if (fd != -1)
+    {
+      g_autofree char *data = glnx_fd_readall_utf8 (fd, NULL, cancellable, error);
+      if (!data)
+        return FALSE;
+      *out_enabled = strstr (data, "1") != NULL;
+      ot_journal_print (LOG_INFO, "s390x: sysfs: Secure Boot enabled: %d", *out_enabled);
+      return TRUE;
+    }
+
+  // Fallback, RHEL 9 kernel is buggy and doesn't have sysfs flag.
+  // Let's check kmsg, with Secure Boot enabled kernel prints smth like:
+  // [    0.027998] Linux version 5.14.0-284.36.1.el9_2.s390x
+  // [    0.023193] setup: Linux is running as a z/VM guest operating system in 64-bit mode
+  // [    0.023193] setup: Linux is running with Secure-IPL enabled
+  // [    0.023194] setup: The IPL report contains the following components:
+  // [    0.023194] setup: 0000000000009000 - 000000000000a000 (not signed)
+  // [    0.023196] setup: 000000000000a000 - 000000000000e000 (signed, verified)
+  // [    0.023197] setup: 0000000000010000 - 0000000000866000 (signed, verified)
+  // [    0.023198] setup: 0000000000867000 - 0000000000868000 (not signed)
+  // [    0.023199] setup: 0000000000877000 - 0000000000878000 (not signed)
+  // [    0.023200] setup: 0000000000880000 - 0000000003f98000 (not signed)
+  fd = openat (AT_FDCWD, "/dev/kmsg", O_NONBLOCK | O_RDONLY | O_CLOEXEC);
+  if (fd == -1)
+    return glnx_throw_errno_prefix (error, "openat(/dev/kmsg)");
+  g_autoptr (GInputStream) istream = g_unix_input_stream_new (g_steal_fd (&fd), TRUE);
+  g_autoptr (GDataInputStream) stream = g_data_input_stream_new (istream);
+  unsigned int max_lines = 5; // no need to read dozens of messages, ours comes really early
+  while (*out_enabled != TRUE && max_lines > 0)
+    {
+      gsize len = 0;
+      g_autofree char *line = g_data_input_stream_read_line (stream, &len, NULL, error);
+      *out_enabled = strstr (line, "Secure-IPL enabled") != NULL;
+      --max_lines;
+    }
+  ot_journal_print (LOG_INFO, "s390x: kmsg: Secure Boot enabled: %d", *out_enabled);
   return TRUE;
 }
 
@@ -306,6 +356,12 @@ _ostree_secure_execution_generate_sdboot (gchar *vmlinuz, gchar *initramfs, gcha
     return FALSE;
   g_autofree gchar *ramdisk_filename = g_strdup_printf ("/proc/%d/fd/%d", self, ramdisk.fd);
 
+  // Since s390-tools commit f4cf4ae6ebb1 (Remove genprotimg-C and switch to genprotimg-Rust
+  // implementation) 'genprotimg' is just a symlink to 'pvimg create', which by default doesn't
+  // overwrite the output image, but introduces the '--overwrite' flag for this. Let's silently
+  // remove the file to support both tools
+  (void)unlink (SECURE_EXECUTION_BOOT_IMAGE);
+
   g_autoptr (GPtrArray) argv = g_ptr_array_new ();
   g_ptr_array_add (argv, "genprotimg");
   g_ptr_array_add (argv, "-i");
@@ -381,10 +437,25 @@ _ostree_bootloader_zipl_post_bls_sync (OstreeBootloader *bootloader, int bootver
 {
   OstreeBootloaderZipl *self = OSTREE_BOOTLOADER_ZIPL (bootloader);
 
-  /* Note that unlike the grub2-mkconfig backend, we make no attempt to
-   * chroot().
-   */
-  g_assert (self->sysroot->booted_deployment);
+  // This can happen in a unit testing environment; at some point what we want to do here
+  // is move all of the zipl logic to a systemd unit instead that's keyed of
+  // ostree-finalize-staged.service.
+  if (!ot_util_process_privileged ())
+    return TRUE;
+
+  // If we're in a booted deployment, we don't need to spawn a container.
+  // Also avoid containerizing if there's no deployments to target, which shouldn't
+  // generally happen.
+  OstreeDeployment *target_deployment;
+  if (self->sysroot->booted_deployment || self->sysroot->deployments->len == 0)
+    {
+      target_deployment = NULL;
+    }
+  else
+    {
+      g_assert_cmpint (self->sysroot->deployments->len, >, 0);
+      target_deployment = self->sysroot->deployments->pdata[0];
+    }
 
   if (!glnx_fstatat_allow_noent (self->sysroot->sysroot_fd, zipl_requires_execute_path, NULL, 0,
                                  error))
@@ -408,11 +479,36 @@ _ostree_bootloader_zipl_post_bls_sync (OstreeBootloader *bootloader, int bootver
       return _ostree_secure_execution_enable (self, bootversion, keys, cancellable, error);
     }
   /* Fallback to non-SE setup */
-  const char *const zipl_argv[] = { "zipl", NULL };
-  int estatus;
-  if (!g_spawn_sync (NULL, (char **)zipl_argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL,
-                     &estatus, error))
+  gboolean sb_enabled = FALSE;
+  if (!_ostree_secure_boot_is_enabled (&sb_enabled, cancellable, error))
     return FALSE;
+  const char *const zipl_argv[]
+      = { "zipl", "--secure", (sb_enabled == TRUE) ? "1" : "auto", "-V", NULL };
+  int estatus;
+  if (target_deployment != NULL)
+    {
+      g_debug ("executing zipl in deployment root");
+      g_autofree char *deployment_path
+          = ostree_sysroot_get_deployment_dirpath (self->sysroot, target_deployment);
+      glnx_autofd int deployment_dfd = -1;
+      if (!glnx_opendirat (self->sysroot->sysroot_fd, deployment_path, TRUE, &deployment_dfd,
+                           error))
+        return FALSE;
+
+      g_autofree char *sysroot_boot
+          = g_build_filename (gs_file_get_path_cached (self->sysroot->path), "boot", NULL);
+      const char *bwrap_args[] = { "--bind", sysroot_boot, "/boot", NULL };
+      if (!_ostree_sysroot_run_in_deployment (deployment_dfd, bwrap_args, zipl_argv, &estatus, NULL,
+                                              error))
+        return glnx_prefix_error (error, "Failed to invoke zipl");
+    }
+  else
+    {
+      g_debug ("executing zipl from booted system");
+      if (!g_spawn_sync (NULL, (char **)zipl_argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL,
+                         NULL, &estatus, error))
+        return FALSE;
+    }
   if (!g_spawn_check_exit_status (estatus, error))
     return FALSE;
   if (!glnx_unlinkat (self->sysroot->sysroot_fd, zipl_requires_execute_path, 0, error))

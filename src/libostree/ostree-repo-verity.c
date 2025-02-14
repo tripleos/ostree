@@ -29,19 +29,6 @@
 #include <linux/fsverity.h>
 #endif
 
-#if defined(HAVE_OPENSSL)
-#include <openssl/bio.h>
-#include <openssl/engine.h>
-#include <openssl/err.h>
-#include <openssl/pem.h>
-#include <openssl/pkcs7.h>
-
-G_DEFINE_AUTOPTR_CLEANUP_FUNC (X509, X509_free);
-G_DEFINE_AUTOPTR_CLEANUP_FUNC (EVP_PKEY, EVP_PKEY_free);
-G_DEFINE_AUTOPTR_CLEANUP_FUNC (BIO, BIO_free);
-G_DEFINE_AUTOPTR_CLEANUP_FUNC (PKCS7, PKCS7_free);
-#endif
-
 gboolean
 _ostree_repo_parse_fsverity_config (OstreeRepo *self, GError **error)
 {
@@ -102,28 +89,14 @@ _ostree_repo_parse_fsverity_config (OstreeRepo *self, GError **error)
   return TRUE;
 }
 
-/* Wrapper around the fsverity ioctl, compressing the result to
- * "success, unsupported or error".  This is used for /boot where
- * we enable verity if supported.
- * */
-gboolean
-_ostree_tmpf_fsverity_core (GLnxTmpfile *tmpf, _OstreeFeatureSupport fsverity_requested,
-                            GBytes *signature, gboolean *supported, GError **error)
+static gboolean
+_ostree_fsverity_enable (int fd, gboolean allow_existing, gboolean *supported, GBytes *signature,
+                         GError **error)
 {
-  /* Set this by default to simplify the code below */
   if (supported)
     *supported = FALSE;
 
-  if (fsverity_requested == _OSTREE_FEATURE_NO)
-    return TRUE;
-
 #ifdef HAVE_LINUX_FSVERITY_H
-  GLNX_AUTO_PREFIX_ERROR ("fsverity", error);
-
-  /* fs-verity requires a read-only file descriptor */
-  if (!glnx_tmpfile_reopen_rdonly (tmpf, error))
-    return FALSE;
-
   struct fsverity_enable_arg arg = {
     0,
   };
@@ -135,7 +108,7 @@ _ostree_tmpf_fsverity_core (GLnxTmpfile *tmpf, _OstreeFeatureSupport fsverity_re
   arg.sig_size = signature ? g_bytes_get_size (signature) : 0;
   arg.sig_ptr = signature ? (guint64)g_bytes_get_data (signature, NULL) : 0;
 
-  if (ioctl (tmpf->fd, FS_IOC_ENABLE_VERITY, &arg) < 0)
+  if (ioctl (fd, FS_IOC_ENABLE_VERITY, &arg) < 0)
     {
       switch (errno)
         {
@@ -143,13 +116,42 @@ _ostree_tmpf_fsverity_core (GLnxTmpfile *tmpf, _OstreeFeatureSupport fsverity_re
         case EOPNOTSUPP:
           return TRUE;
         default:
-          return glnx_throw_errno_prefix (error, "ioctl(FS_IOC_ENABLE_VERITY)");
+          if (errno != EEXIST || !allow_existing)
+            return glnx_throw_errno_prefix (error, "ioctl(FS_IOC_ENABLE_VERITY)");
         }
     }
 
   if (supported)
     *supported = TRUE;
 #endif
+
+  return TRUE;
+}
+
+/* Wrapper around the fsverity ioctl, compressing the result to
+ * "success, unsupported or error".  This is used for /boot where
+ * we enable verity if supported.
+ * */
+gboolean
+_ostree_tmpf_fsverity_core (GLnxTmpfile *tmpf, _OstreeFeatureSupport fsverity_requested,
+                            GBytes *signature, gboolean *supported, GError **error)
+{
+  if (fsverity_requested == _OSTREE_FEATURE_NO)
+    {
+      if (supported)
+        *supported = FALSE;
+      return TRUE;
+    }
+
+  GLNX_AUTO_PREFIX_ERROR ("fsverity", error);
+
+  /* fs-verity requires a read-only file descriptor */
+  if (!glnx_tmpfile_reopen_rdonly (tmpf, error))
+    return FALSE;
+
+  if (!_ostree_fsverity_enable (tmpf->fd, FALSE, supported, signature, error))
+    return FALSE;
+
   return TRUE;
 }
 
@@ -204,5 +206,42 @@ _ostree_tmpf_fsverity (OstreeRepo *self, GLnxTmpfile *tmpf, GBytes *signature, G
 #else
   g_assert_cmpint (self->fs_verity_wanted, !=, _OSTREE_FEATURE_YES);
 #endif
+  return TRUE;
+}
+
+gboolean
+_ostree_ensure_fsverity (OstreeRepo *self, gboolean allow_enoent, int dirfd, const char *path,
+                         gboolean *supported_out, GError **error)
+{
+  struct stat buf;
+  gboolean supported;
+
+  if (supported_out)
+    *supported_out = TRUE;
+
+  if (fstatat (dirfd, path, &buf, AT_SYMLINK_NOFOLLOW) != 0)
+    {
+      if (errno == ENOENT && allow_enoent)
+        return TRUE;
+
+      return glnx_throw_errno_prefix (error, "fstatat(%s)", path);
+    }
+
+  if (!S_ISREG (buf.st_mode))
+    return TRUE; /* Ignore symlinks, etc */
+
+  glnx_autofd int fd = openat (dirfd, path, O_CLOEXEC | O_RDONLY);
+  if (fd < 0)
+    return glnx_throw_errno_prefix (error, "openat(%s)", path);
+
+  if (!_ostree_fsverity_enable (fd, TRUE, &supported, NULL, error))
+    return FALSE;
+
+  if (!supported && self->fs_verity_wanted == _OSTREE_FEATURE_YES)
+    return glnx_throw (error, "fsverity required but filesystem does not support it");
+
+  if (supported_out)
+    *supported_out = supported;
+
   return TRUE;
 }
